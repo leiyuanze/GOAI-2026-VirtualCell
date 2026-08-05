@@ -73,7 +73,7 @@ python>=3.10, torch>=2.12.0+cu126
 numpy, pandas, scipy, scikit-learn, tqdm
 ```
 
-GPU：建议 RTX 3050 Ti 4GB+
+本仓库已在 RTX 3050 Ti（4GB）上验证可完整训练。训练时关闭其他 GPU 进程以释放显存。
 
 ### 从头训练
 
