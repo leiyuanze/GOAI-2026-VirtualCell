@@ -39,7 +39,6 @@
 │   └── model_v29_best.pt
 ├── submission_file/                # 最终提交
 │   └── prediction_ensemble6.csv   # 4454×4422, log2, 无 NA/inf
-└── demo_notebook.ipynb            # 复现 demo
 ```
 
 ## 核心思路
@@ -72,8 +71,6 @@
 python>=3.10, torch>=2.12.0+cu126
 numpy, pandas, scipy, scikit-learn, tqdm
 ```
-
-本仓库已在 RTX 3050 Ti（4GB）上验证可完整训练。训练时关闭其他 GPU 进程以释放显存。
 
 ### 从头训练
 
