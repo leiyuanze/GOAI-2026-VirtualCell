@@ -8,7 +8,7 @@
 
 ## 一句话概述
 
-构建了一个**带残差分解 + 上下文先验 + 菌株×化合物交互项**的 MLP 残差网络，通过 4 模型混合集成实现跨菌株/化合物的蛋白质组扰动响应预测。在封闭数据榜 val 集四场景（chem_only/strain_only/both/time）蛋白 R² 中位数 0.667~0.879，FC PCC 0.237~0.610，且预测 Δ 显著富集到 4 个已知生物学通路。
+构建了一个**带残差分解 + 上下文先验 + 菌株×化合物交互项**的 MLP 残差网络，通过 4 模型混合集成实现跨菌株/化合物的蛋白质组扰动响应预测。在 val 集四场景（chem_only/strain_only/both/time）蛋白 R² 中位数 0.667~0.879，FC PCC 0.237~0.610，且预测 Δ 显著富集到 4 个已知生物学通路。
 
 ## 仓库结构
 
@@ -25,7 +25,8 @@
 │   ├── 04_model_v29.py            # v2.9 + 交互项 + 自适应 loss
 │   ├── 05b_train_v21.py           # v2.1 训练（seed 42/43/44）
 │   ├── 05q_train_v29.py           # v2.9 训练
-│   ├── 07e_submit_v29.py          # 最终提交生成（4 模型集成）
+│   ├── 07e_submit_v29.py          # 集成推理（4 模型，输出 4422 保留蛋白）
+│   ├── 09_submit_5243.py          # 补齐列到官方 feature contract 5243
 │   ├── _compare.py                # 模型与基线公平对比
 │   ├── _full_score.py             # 6 模块竞赛评分模拟
 │   └── _pathway2.py               # 通路富集分析
@@ -38,7 +39,7 @@
 │   ├── model_v21.pt, model_v21_s43.pt, model_v21_s44.pt
 │   └── model_v29_best.pt
 ├── submission_file/                # 最终提交
-│   └── prediction_ensemble6.csv   # 4454×4422, log2, 无 NA/inf
+│   └── prediction_final_5243.csv  # 4454×5243, log2, 无 NA/inf，与官方 feature contract 完全一致
 ```
 
 ## 核心思路
@@ -46,7 +47,8 @@
 ### 问题形式化
 
 - **输入**：菌株 ID + 化合物 ID + 培养基 + 温度 + 时间 + 仪器上下文
-- **输出**：4422 个蛋白的 log2 强度向量
+- **模型输出**：4422 个保留蛋白（缺失率<80%）的 log2 强度向量
+- **提交输出**：5243 个蛋白（官方 feature contract），821 个高缺失蛋白填训练集 log2 均值
 - **评测**：6 个模块在 4 个 OOD 场景（M1 25% + M2 20% + M3 20% + M4 20% + M5 10% + M6 5%）
 
 ### 关键设计决策
@@ -81,14 +83,15 @@ python code/05b_train_v21.py 42 # ~5分钟
 python code/05b_train_v21.py 43 # ~5分钟
 python code/05b_train_v21.py 44 # ~5分钟
 python code/05q_train_v29.py 42 # ~10分钟
-python code/07e_submit_v29.py   # 生成 prediction_ensemble6.csv
+python code/07e_submit_v29.py   # 集成推理 → prediction_ensemble6.csv (4454×4422)
+python code/09_submit_5243.py   # 补齐列 → prediction_final_5243.csv (4454×5243)
 ```
 
 ### 直接推理
 
 ```bash
-python code/07e_submit_v29.py
-# 输出：data/prediction_ensemble6.csv
+python code/07e_submit_v29.py   # 输出 data/prediction_ensemble6.csv (4422 列)
+python code/09_submit_5243.py   # 输出 data/prediction_final_5243.csv (5243 列，最终提交)
 ```
 
 ## 实验结果
@@ -151,4 +154,4 @@ Top3 高效应蛋白：PMA2（质膜质子泵，|Δ|=1.72）、CWP1（细胞壁�
 ---
 
 
-**提交文件**：`submission_file/prediction_ensemble6.csv`
+**提交文件**：`submission_file/prediction_final_5243.csv`（4454×5243，与官方 feature contract 一致）
