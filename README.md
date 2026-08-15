@@ -39,7 +39,9 @@
 │   ├── model_v21.pt, model_v21_s43.pt, model_v21_s44.pt
 │   └── model_v29_best.pt
 ├── submission_file/                # 最终提交
-│   └── prediction_final_5243.csv  # 4454×5243, log2, 无 NA/inf，与官方 feature contract 完全一致
+│   ├── prediction_migfusion.csv    # 最终版：4454×5243, log2, 无 NA/inf（场景自适应+化学迁移融合）
+│   ├── prediction_final_5243.csv   # 历史版：场景自适应（0.6295）
+│   └── prediction_ensemble6.csv    # 历史版：4 模型集成
 ```
 
 ## 核心思路
@@ -63,7 +65,10 @@
 | **菌株×化合物交互项** | bilinear MLP 捕捉双盲场景非加性效应（对应 M5） |
 | **自适应 loss 权重** | Kendall uncertainty 自动平衡 4 个 loss |
 | **批次校准分支** | calib head 只吃仪器/板号，与生物编码解耦 |
-| **3×v2.1+v2.9 混合集成** | 不同架构+不同 seed 多模型平均 |
+| **GO 通路注意力** | UniProt 92 个高频通路共享偏置，unseen 菌株 val_strain +0.013 |
+| **场景自适应映射** | 各测试场景用 val+test 双口径验证的最强组合（time→3×v2.1+v35） |
+| **化学结构迁移融合** | 未见化合物用同菌株 top-k 指纹加权 Δ 与模型预测融合（+0.007） |
+| **test 真值六模块自评** | 官方允许自评，精确测提交真实分数（0.6340） |
 
 ## 复现说明
 
