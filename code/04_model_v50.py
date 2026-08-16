@@ -46,6 +46,8 @@ class VCellModel(nn.Module):
         self.morgan_proj = nn.Sequential(
             nn.Linear(64, 64), nn.LayerNorm(64), nn.GELU(),
         )
+        # ★ RDKit descriptors 投影（gpt2 步骤9：10 维描述符 → 16 维）
+        self.desc_proj = nn.Linear(10, 16)
 
         # ---- Control 分支（状态模型）：strain + medium + temp + time + ctx_prior + calib ----
         d_ctrl = 16 + 2 + 1 + 3 + 4 + 64 + (4 + 4 + 16)  # strain, med, temp, time, sm, ctx_prior, calib
@@ -56,8 +58,8 @@ class VCellModel(nn.Module):
         )
         self.fc_ctrl = nn.Linear(latent, P)
 
-        # ---- Response 分支（低秩扰动）：strain + chem + Morgan + med + temp + time + ct + ctx_prior ----
-        d_resp = 16 + 32 + 64 + 2 + 1 + 3 + 8 + 64
+        # ---- Response 分支（低秩扰动）：strain + chem + Morgan + desc + med + temp + time + ct + ctx_prior ----
+        d_resp = 16 + 32 + 64 + 16 + 2 + 1 + 3 + 8 + 64
         self.resp_enc = nn.Sequential(
             nn.Linear(d_resp, hidden), nn.LayerNorm(hidden), nn.GELU(), nn.Dropout(0.2),
             nn.Linear(hidden, hidden), nn.LayerNorm(hidden), nn.GELU(), nn.Dropout(0.2),
@@ -130,7 +132,8 @@ class VCellModel(nn.Module):
         if temp.dim() == 1:
             temp = temp.unsqueeze(1)
 
-        z = self.resp_enc(torch.cat([se, ce, morgan, med, temp, tfeat, cte, cp], dim=1))
+        z = self.resp_enc(torch.cat([se, ce, morgan, self.desc_proj(x['chem_desc']),
+                                     med, temp, tfeat, cte, cp], dim=1))
         # 低秩主项
         delta_lr = torch.mm(z, self.U.T)  # (N, P)
         # 门控：unseen 化合物保留 20%，unseen 菌株保留 30%（共享应激响应不归零，

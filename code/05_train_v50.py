@@ -106,6 +106,7 @@ _feat_g = {
     'strain_seen': torch.from_numpy(feats['strain_seen']).to(DEV),
     'ctx_prior': torch.from_numpy(ctx_prior_all).to(DEV),
     'chem_morgan': torch.from_numpy(feats['chem_morgan']).to(DEV),
+    'chem_desc': torch.from_numpy(feats['chem_desc'].astype(np.float32)).to(DEV),
 }
 
 def make_x(idx):
@@ -118,6 +119,7 @@ def make_x(idx):
         'seen': [f['chem_seen'][idx], f['strain_seen'][idx]],
         'ctx_prior': f['ctx_prior'][idx],
         'chem_morgan': f['chem_morgan'][idx],
+        'chem_desc': f['chem_desc'][idx],
     }
 
 # ---------- 模型 ----------
@@ -240,6 +242,35 @@ for i, sid in enumerate(treat_all):
         with np.errstate(invalid='ignore'):
             ctrl_all[i] = np.where(cm.sum(0) > 0, np.nansum(np.where(cm, cvals, np.nan), 0) / cm.sum(0), np.nan)
 
+# ---------- 组件级残差监督目标（gpt2 步骤13 / P1：LOO μ_ctx / μ_drug，train-only）----------
+print("[组件监督] LOO μ_ctx / μ_drug ...", flush=True)
+chem_of_tr = meta['perturbation_no_concentration'].values[train_treat]
+ctx_of_tr = (meta['Strains'].astype(str) + '|' + meta['Medium'].astype(str) + '|'
+             + meta['Temperature'].astype(str) + '|' + meta['pert_time'].astype(str)).values[train_treat]
+mu_ctx = np.full((len(treat_pos), P), np.nan)
+mu_drug = np.full((len(treat_pos), P), np.nan)
+for key, members in pd.Series(np.arange(len(treat_pos)), index=ctx_of_tr).groupby(level=0):
+    members = members.values
+    if len(members) > 1:
+        s = np.nansum(delta_train[members], axis=0)
+        n = np.sum(np.isfinite(delta_train[members]), axis=0)
+        for m in members:
+            msk = np.isfinite(delta_train[m])
+            mu_ctx[m] = np.where(n > 0, (s - np.where(msk, delta_train[m], 0)) / np.maximum(n - msk.astype(float), 1), np.nan)
+for key, members in pd.Series(np.arange(len(treat_pos)), index=chem_of_tr).groupby(level=0):
+    members = members.values
+    if len(members) > 1:
+        s = np.nansum(delta_train[members], axis=0)
+        n = np.sum(np.isfinite(delta_train[members]), axis=0)
+        for m in members:
+            msk = np.isfinite(delta_train[m])
+            mu_drug[m] = np.where(n > 0, (s - np.where(msk, delta_train[m], 0)) / np.maximum(n - msk.astype(float), 1), np.nan)
+resid_ctx = np.where(np.isfinite(delta_train) & np.isfinite(mu_ctx), delta_train - mu_ctx, 0.0).astype(np.float32)
+resid_drug = np.where(np.isfinite(delta_train) & np.isfinite(mu_drug), delta_train - mu_drug, 0.0).astype(np.float32)
+mask_resid_ctx = (np.isfinite(delta_train) & np.isfinite(mu_ctx) & (mu_ctx != 0)).astype(np.float32)
+mask_resid_drug = (np.isfinite(delta_train) & np.isfinite(mu_drug) & (mu_drug != 0)).astype(np.float32)
+print(f"[组件监督] 有效 ctx 残差 {mask_resid_ctx.sum()/1e6:.2f}M / drug 残差 {mask_resid_drug.sum()/1e6:.2f}M", flush=True)
+
 # ---------- 训练张量 ----------
 y_train_t = torch.tensor(y_train, device=DEV)
 m_train_t = torch.tensor(m_train, device=DEV)
@@ -267,6 +298,12 @@ delta_target_full = torch.zeros_like(y_train_t)
 delta_mask_full = torch.zeros_like(m_train_t)
 delta_target_full[treat_in_train] = delta_train_t
 delta_mask_full[treat_in_train] = delta_mask_t
+
+# 组件监督张量（处理行索引）
+resid_ctx_t = torch.tensor(resid_ctx, device=DEV)
+resid_drug_t = torch.tensor(resid_drug, device=DEV)
+mask_resid_ctx_t = torch.tensor(mask_resid_ctx, device=DEV)
+mask_resid_drug_t = torch.tensor(mask_resid_drug, device=DEV)
 
 # ---------- 三阶段训练（gpt2 阶段 A/B/C）----------
 # 阶段 A (1-40)：control 预训练，只优化 ctrl 分支
@@ -326,12 +363,19 @@ for ep in range(1, EPOCHS + 1):
             loss_delta = torch.tensor(0.0, device=DEV)
         # FC corr（处理样本，train-only 对照）
         loss_fc = torch.tensor(0.0, device=DEV)
+        # ★ 组件级残差监督（gpt2 步骤13）：delta_pred 对齐 LOO μ 残差
+        loss_ctx = torch.tensor(0.0, device=DEV)
+        loss_drug = torch.tensor(0.0, device=DEV)
         if is_treat.any():
             pos = np.where(is_treat)[0]
             yc = y_ctrl_train_t[b[pos]]
             fc_ok = torch.isfinite(yc).any(dim=1)
             if fc_ok.any():
                 loss_fc = fc_corr_loss(y_pred[pos][fc_ok], yt[pos][fc_ok], m[pos][fc_ok], yc[fc_ok])
+            # 组件监督：delta_pred vs LOO 残差（仅阶段 B/C 启用，代码内按 phase 加权）
+            dpi = b[pos]
+            loss_ctx = corr_loss(delta_pred[pos], resid_ctx_t[dpi], mask_resid_ctx_t[dpi])
+            loss_drug = corr_loss(delta_pred[pos], resid_drug_t[dpi], mask_resid_drug_t[dpi])
 
         loss_prot = per_protein_corr_loss(y_pred, yt, m)
         loss_graph = graph_reg_loss(y_pred, m, V_graph_t)
@@ -339,9 +383,12 @@ for ep in range(1, EPOCHS + 1):
         if phase == 'A':
             loss = loss_ctrl  # control 预训练
         elif phase == 'B':
-            loss = (0.3 * loss_y + 0.35 * loss_delta + 0.2 * loss_fc + 0.1 * loss_prot + 0.05 * loss_graph)
+            loss = (0.3 * loss_y + 0.35 * loss_delta + 0.15 * loss_fc
+                    + 0.1 * loss_ctx + 0.1 * loss_drug
+                    + 0.1 * loss_prot + 0.05 * loss_graph)
         else:
-            loss = (0.3 * loss_y + 0.15 * loss_ctrl + 0.35 * loss_delta + 0.2 * loss_fc
+            loss = (0.3 * loss_y + 0.15 * loss_ctrl + 0.35 * loss_delta + 0.15 * loss_fc
+                    + 0.1 * loss_ctx + 0.1 * loss_drug
                     + 0.1 * loss_prot + 0.05 * loss_graph)
         optimizer.zero_grad()
         loss.backward()

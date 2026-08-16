@@ -82,6 +82,7 @@ tchash = np.array([hash_vec(c) for c in tmeta['perturbation_no_concentration']],
 tcseen = np.array([1.0 if c in train_chems else 0.0 for c in tmeta['perturbation_no_concentration']], dtype=np.float32)
 tsseen = np.array([1.0 if s in train_strains else 0.0 for s in tmeta['Strains']], dtype=np.float32)
 tmorgan = feats['test_chem_morgan'].astype(np.float32)
+tdesc = feats['test_chem_desc'].astype(np.float32)
 gmean = feats['gmean']
 ctx_key_tr = (meta['Strains'].astype(str) + '|' + meta['Medium'].astype(str) + '|'
               + meta['Temperature'].astype(str) + '|' + meta['pert_time'].astype(str)).values
@@ -111,7 +112,8 @@ def tpred_x(names, weights=None):
             if n in ('v35', 'v37', 'v50'):
                 x['ctx_prior'] = torch.from_numpy(t_ctx_prior)
                 x['chem_morgan'] = torch.from_numpy(tmorgan)
-            xg = {k: (v.to(DEV) if k in ('ctx_prior', 'chem_morgan') else [t.to(DEV) for t in v]) for k, v in x.items()}
+                x['chem_desc'] = torch.from_numpy(tdesc)
+            xg = {k: (v.to(DEV) if k in ('ctx_prior', 'chem_morgan', 'chem_desc') else [t.to(DEV) for t in v]) for k, v in x.items()}
             preds.append(MODELS[n](xg).cpu().numpy())
     if weights is None:
         return np.mean(preds, axis=0)

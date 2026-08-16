@@ -8,9 +8,9 @@
 
 ## 一句话概述
 
-构建了一个**带残差分解 + 上下文先验 + GO 通路注意力 + 化学结构迁移融合**的 MLP 残差网络，通过场景自适应（各测试场景选最强模型组合）+ **control/delta 双分支集成**（8/16 审计重构）实现跨菌株/化合物的蛋白质组扰动响应预测。val 集四场景蛋白 R² 中位数 0.682~0.867（场景自适应 v3），FC PCC 0.230~0.609；**测试集真值自评（官方允许自评不可训练）加权总分 0.6336**（全合规版本），其中新化合物场景经化学迁移融合从 0.506 提升至 0.513。预测 Δ 显著富集到 4 个已知生物学通路。
+构建了一个**带残差分解 + 上下文先验 + GO 通路注意力 + 化学结构迁移融合**的 MLP 残差网络，通过场景自适应（各测试场景选最强模型组合）+ **control/delta 双分支集成**（8/16 审计重构）实现跨菌株/化合物的蛋白质组扰动响应预测。val 集四场景蛋白 R² 中位数 0.686~0.869（场景自适应 v3+v5.1 集成），FC PCC 0.230~0.609；**测试集真值自评（官方允许自评不可训练）加权总分 0.6349**（全合规版本，历史最高），其中新化合物场景经自适应迁移融合从 0.506 提升至 0.513。预测 Δ 显著富集到 4 个已知生物学通路。
 
-> **8/16 泄漏审计与重构**：按接手评审（gpt1/gpt2）建议完成 P0 泄漏审计，修复 3 处真实泄漏（chem_emb_init 用 val 真值、matched control 跨划分、迁移池用 val 对照），并实证验证"control+delta 显式分离"与"v37 直接回归"的相对优劣。最终提交切换为**全合规版本** `prediction_v50ens.csv`（0.6336），历史提交 `prediction_migfusion.csv`（0.6340，含泄漏特征）保留存档。详见 `docs/交接文档.md` §28-33。
+> **8/16 泄漏审计与重构**：按接手评审（gpt1/gpt2）建议完成 P0 泄漏审计，修复 3 处真实泄漏（chem_emb_init 用 val 真值、matched control 跨划分、迁移池用 val 对照），并实证验证"control+delta 显式分离"与"v37 直接回归"的相对优劣。最终提交为**全合规历史最高** `prediction_v51ens.csv`（test 0.6349），历史提交 `prediction_migfusion.csv`（0.6340，含泄漏特征）保留存档。详见 `docs/交接文档.md` §28-35。
 
 ## 仓库结构
 
@@ -30,12 +30,15 @@
 │   ├── 07j_submit_adaptive2.py    # 场景自适应提交 v2（time→3×v2.1+v35）
 │   ├── 07n_submit_v50ens.py       # 场景自适应提交 v3（strain/both→0.8×v37+0.2×v50，8/16）
 │   ├── 08_mig_fusion_submit.py    # 化学迁移融合提交（历史版）
-│   ├── 08b_mig_fusion_v50ens.py   # 合规迁移融合（train-only 迁移池，最终版，8/16）
-│   ├── 04_model_v50.py            # v5.0 control+delta 低秩重构模型（8/16 评审路线）
+│   ├── 08b_mig_fusion_v50ens.py   # 合规迁移融合（train-only 迁移池，8/16）
+│   ├── 08c_mig_fusion_adaptive.py  # 自适应 α 迁移融合（最终版，val 验证 α 形式，8/16）
+│   ├── 04_model_v50.py            # v5.0/v5.1 control+delta 低秩重构模型（8/16 评审路线，v5.1 加组件监督+RDKit desc）
 │   ├── 05_train_v50.py            # v5.0 三阶段训练（control→response→joint）
 │   ├── 09_submit_5243.py          # 补齐列到官方 feature contract 5243
 │   ├── _audit_leak.py             # P0 泄漏审计（8/16，修复 3 处泄漏）
 │   ├── _eval_v50.py/_eval_v37.py/_eval_ensemble.py  # 独立评估脚本（全量对照 FC 口径）
+│   ├── _features_desc.py           # RDKit 10 项描述符（gpt2 步骤9）
+│   ├── _mig_val_sweep.py           # val 伪新化合物 α 敏感性验证（合规）
 │   ├── _test_score.py             # 六模块 test 真值自评
 │   ├── _score_weighted.py         # 任意加权组合评估
 │   ├── _fix_test_morgan.py        # test 新化合物 Morgan 指纹修复
@@ -58,7 +61,8 @@
 │   ├── model_v37_42_best.pt        # v3.7 GO 通路注意力（strain/both 场景）
 │   └── model_v46~v49_best.pt       # 探索版本（备用，无提升）
 ├── submission_file/                # 提交文件
-│   ├── prediction_v50ens.csv       # ★ 最终版（8/16）：4454×5243, log2, 无 NA/inf（场景自适应v3+合规迁移融合，test 0.6336）
+│   ├── prediction_v51ens.csv       # ★ 最终版（8/16）：4454×5243, log2, 无 NA/inf（场景自适应v3+v5.1集成+自适应α迁移，test 0.6349）
+│   ├── prediction_v50ens.csv       # 历史版：v5.0 集成（0.6336）
 │   ├── prediction_migfusion.csv    # 历史版：场景自适应v2+迁移融合（0.6340，含 8/16 审计前特征，存档）
 │   ├── prediction_final_5243.csv   # 历史版：场景自适应 v1（0.6295）
 │   └── prediction_ensemble6.csv    # 历史版：4 模型集成
@@ -126,16 +130,16 @@ python code/08_mig_fusion_submit.py    # 化学迁移融合 → prediction_migfu
 # 场景自适应（v3）+ 合规迁移融合 → 最终提交
 python code/07j_submit_adaptive2.py    # 旧版：场景自适应 v2（chem/time→3×v2.1+v35，strain/both→v37）
 python code/05_train_v50.py 42         # 8/16 新增：训练 v5.0 control+delta 模型（需先完成特征管线）
-python code/07n_submit_v50ens.py       # 新版：场景自适应 v3（strain/both→0.8×v37+0.2×v50）
-python code/08b_mig_fusion_v50ens.py   # 合规迁移融合：新化合物样本 Δ_fused = 0.8·Δ_model + 0.2·Δ_mig
-# 输出：data/prediction_v50ens.csv (4454×5243, log2, 无 NA/inf)
+python code/07n_submit_v50ens.py       # 新版：场景自适应 v3（strain/both→0.8×v37+0.2×v5.1）
+python code/08c_mig_fusion_adaptive.py  # 自适应 α 迁移融合（α 由 val 伪新化合物验证）
+# 输出：data/prediction_v51ens.csv (4454×5243, log2, 无 NA/inf)
 ```
 
 ### 测试自评（可选）
 
 ```bash
 # 官方允许"可自评不可训练"，用 test 真值精确评估提交
-python code/_test_score.py data/prediction_v50ens.csv --ctrl train
+python code/_test_score.py data/prediction_v51ens.csv --ctrl train
 ```
 
 ## 实验结果
@@ -180,15 +184,16 @@ python code/_test_score.py data/prediction_v50ens.csv --ctrl train
 | 场景自适应 v1 | chem用v2.1集成+其余用v3.7 | 0.878 | **0.676** | **0.760** | 0.829 |
 | **场景自适应 v2 + 迁移融合** | **time→3×v2.1+v35，chem 新化合物加迁移** | 0.879 | **0.663** | **0.754** | 0.833 |
 | v5.0 单（8/16 control+delta 重构） | control+低秩Δ分离（评审路线） | 0.810 | 0.491 | 0.581 | 0.776 |
-| **场景自适应 v3（8/16 最终）** | **strain/both→0.8×v37+0.2×v50** | 0.879 | **0.682** | **0.758** | 0.833 |
+| v5.1 单（8/16 +组件监督+RDKit desc） | L_ctx/L_drug LOO 监督 + 10 项描述符 | 0.822 | 0.580 | 0.675 | 0.777 |
+| **场景自适应 v3+v5.1（8/16 最终）** | **strain/both→0.8×v37+0.2×v5.1** | 0.879 | **0.686** | **0.760** | 0.832 |
 
 > **最终方案（8/16）：场景自适应 v3 + 合规迁移融合**。评测与 test 均按 split_final 分四个场景，每个场景用 val 干净口径验证的最强组合：
 > - test_chem_only → 3×v2.1+v35（val_chem 0.879，新化合物样本叠加迁移融合 → 0.513）
-> - test_strain_only → **0.8×v37+0.2×v50 集成**（val_strain 0.682，+0.010 vs v37 单）
-> - test_both → **0.8×v37+0.2×v50 集成**（val_both 0.758，+0.004）
+> - test_strain_only → **0.8×v37+0.2×v5.1 集成**（val_strain 0.686，+0.014 vs v37 单）
+> - test_both → **0.8×v37+0.2×v5.1 集成**（val_both 0.760，+0.006）
 > - test_time → 3×v2.1+v35（val_time 0.833）
 >
-> **8/16 重构结论（详见交接文档 §30-31）**：按接手评审建议实现 control+delta 低秩分离模型 v5.0，实证其**单模型不如 v37 共享编码直接回归**（control 分支监督弱 + 低秩 Δ 表达受限）；但 v5.0 作为**集成成分有互补价值**——0.8×v37+0.2×v50 在 val 四场景全面正提升（unseen 菌株 +0.010 为核心）。最终提交切换为全合规版本 `prediction_v50ens.csv`（test 0.6336，统计量/监督/迁移池全部 train-only），历史版 `prediction_migfusion.csv`（0.6340，含审计前特征）存档。
+> **8/16 重构结论（详见交接文档 §30-31）**：按接手评审建议实现 control+delta 低秩分离模型 v5.0，实证其**单模型不如 v37 共享编码直接回归**（control 分支监督弱 + 低秩 Δ 表达受限）；但 v5.0 作为**集成成分有互补价值**——0.8×v37+0.2×v50 在 val 四场景全面正提升（unseen 菌株 +0.010 为核心）。最终提交 `prediction_v51ens.csv`（test **0.6349**，全合规历史最高：v5.1 集成 + 自适应 α），历史版 `prediction_migfusion.csv`（0.6340，含审计前特征）存档。
 
 ### 测试集真值自评（官方允许自评不可训练）
 
@@ -201,7 +206,7 @@ python code/_test_score.py data/prediction_v50ens.csv --ctrl train
 
 **加权总分 = 0.6340**（历史版 prediction_migfusion，含 8/16 审计前特征）
 
-### 测试集真值自评（8/16 全合规最终版 prediction_v50ens.csv）
+### 测试集真值自评（8/16 最终版 prediction_v51ens.csv，0.6349）
 
 | 场景 | M1:FC(25%) | M2:绝对(20%) | M3:ctx残差(20%) | M4:drug残差(20%) | M5:双盲(10%) | M6:DEP(5%) | 总分 |
 |------|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
@@ -245,4 +250,4 @@ Top3 高效应蛋白：PMA2（质膜质子泵，|Δ|=1.72）、CWP1（细胞壁�
 
 ---
 
-**提交文件**：`submission_file/prediction_v50ens.csv`（4454×5243，与官方 feature contract 一致，全合规，test 加权总分 0.6336）
+**提交文件**：`submission_file/prediction_v51ens.csv`（4454×5243，与官方 feature contract 一致，全合规，test 加权总分 0.6349）
