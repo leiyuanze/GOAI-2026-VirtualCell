@@ -8,7 +8,9 @@
 
 ## 一句话概述
 
-构建了一个**带残差分解 + 上下文先验 + GO 通路注意力 + 化学结构迁移融合**的 MLP 残差网络，通过场景自适应（各测试场景选最强模型组合）实现跨菌株/化合物的蛋白质组扰动响应预测。val 集四场景蛋白 R² 中位数 0.663~0.879（场景自适应 v2），FC PCC 0.237~0.610；**测试集真值自评（官方允许自评不可训练）加权总分 0.6340**，其中新化合物场景经化学迁移融合从 0.505 提升至 0.512。预测 Δ 显著富集到 4 个已知生物学通路。
+构建了一个**带残差分解 + 上下文先验 + GO 通路注意力 + 化学结构迁移融合**的 MLP 残差网络，通过场景自适应（各测试场景选最强模型组合）+ **control/delta 双分支集成**（8/16 审计重构）实现跨菌株/化合物的蛋白质组扰动响应预测。val 集四场景蛋白 R² 中位数 0.682~0.867（场景自适应 v3），FC PCC 0.230~0.609；**测试集真值自评（官方允许自评不可训练）加权总分 0.6336**（全合规版本），其中新化合物场景经化学迁移融合从 0.506 提升至 0.513。预测 Δ 显著富集到 4 个已知生物学通路。
+
+> **8/16 泄漏审计与重构**：按接手评审（gpt1/gpt2）建议完成 P0 泄漏审计，修复 3 处真实泄漏（chem_emb_init 用 val 真值、matched control 跨划分、迁移池用 val 对照），并实证验证"control+delta 显式分离"与"v37 直接回归"的相对优劣。最终提交切换为**全合规版本** `prediction_v50ens.csv`（0.6336），历史提交 `prediction_migfusion.csv`（0.6340，含泄漏特征）保留存档。详见 `docs/交接文档.md` §28-33。
 
 ## 仓库结构
 
@@ -26,8 +28,14 @@
 │   ├── 05_train_v37.py            # v3.7 训练（GO 通路注意力）
 │   ├── 07i_submit_adaptive.py     # 场景自适应提交 v1
 │   ├── 07j_submit_adaptive2.py    # 场景自适应提交 v2（time→3×v2.1+v35）
-│   ├── 08_mig_fusion_submit.py    # 化学迁移融合提交（最终）
+│   ├── 07n_submit_v50ens.py       # 场景自适应提交 v3（strain/both→0.8×v37+0.2×v50，8/16）
+│   ├── 08_mig_fusion_submit.py    # 化学迁移融合提交（历史版）
+│   ├── 08b_mig_fusion_v50ens.py   # 合规迁移融合（train-only 迁移池，最终版，8/16）
+│   ├── 04_model_v50.py            # v5.0 control+delta 低秩重构模型（8/16 评审路线）
+│   ├── 05_train_v50.py            # v5.0 三阶段训练（control→response→joint）
 │   ├── 09_submit_5243.py          # 补齐列到官方 feature contract 5243
+│   ├── _audit_leak.py             # P0 泄漏审计（8/16，修复 3 处泄漏）
+│   ├── _eval_v50.py/_eval_v37.py/_eval_ensemble.py  # 独立评估脚本（全量对照 FC 口径）
 │   ├── _test_score.py             # 六模块 test 真值自评
 │   ├── _score_weighted.py         # 任意加权组合评估
 │   ├── _fix_test_morgan.py        # test 新化合物 Morgan 指纹修复
@@ -50,7 +58,8 @@
 │   ├── model_v37_42_best.pt        # v3.7 GO 通路注意力（strain/both 场景）
 │   └── model_v46~v49_best.pt       # 探索版本（备用，无提升）
 ├── submission_file/                # 提交文件
-│   ├── prediction_migfusion.csv    # ★ 最终版：4454×5243, log2, 无 NA/inf（场景自适应+化学迁移融合，test 0.6340）
+│   ├── prediction_v50ens.csv       # ★ 最终版（8/16）：4454×5243, log2, 无 NA/inf（场景自适应v3+合规迁移融合，test 0.6336）
+│   ├── prediction_migfusion.csv    # 历史版：场景自适应v2+迁移融合（0.6340，含 8/16 审计前特征，存档）
 │   ├── prediction_final_5243.csv   # 历史版：场景自适应 v1（0.6295）
 │   └── prediction_ensemble6.csv    # 历史版：4 模型集成
 └── docs/                           # 文档
@@ -114,17 +123,19 @@ python code/08_mig_fusion_submit.py    # 化学迁移融合 → prediction_migfu
 ### 直接推理
 
 ```bash
-# 场景自适应（v2）+ 化学迁移融合 → 最终提交
-python code/07j_submit_adaptive2.py    # 场景自适应：chem/time→3×v2.1+v35，strain/both→v37
-python code/08_mig_fusion_submit.py    # 迁移融合：新化合物样本 Δ_fused = 0.8·Δ_model + 0.2·Δ_mig
-# 输出：data/prediction_migfusion.csv (4454×5243, log2, 无 NA/inf)
+# 场景自适应（v3）+ 合规迁移融合 → 最终提交
+python code/07j_submit_adaptive2.py    # 旧版：场景自适应 v2（chem/time→3×v2.1+v35，strain/both→v37）
+python code/05_train_v50.py 42         # 8/16 新增：训练 v5.0 control+delta 模型（需先完成特征管线）
+python code/07n_submit_v50ens.py       # 新版：场景自适应 v3（strain/both→0.8×v37+0.2×v50）
+python code/08b_mig_fusion_v50ens.py   # 合规迁移融合：新化合物样本 Δ_fused = 0.8·Δ_model + 0.2·Δ_mig
+# 输出：data/prediction_v50ens.csv (4454×5243, log2, 无 NA/inf)
 ```
 
 ### 测试自评（可选）
 
 ```bash
 # 官方允许"可自评不可训练"，用 test 真值精确评估提交
-python code/_test_score.py data/prediction_migfusion.csv --ctrl train
+python code/_test_score.py data/prediction_v50ens.csv --ctrl train
 ```
 
 ## 实验结果
@@ -168,18 +179,16 @@ python code/_test_score.py data/prediction_migfusion.csv --ctrl train
 | **v3.7 单模型** | **+ GO 通路注意力(92通路)** | 0.867 | **0.663** | **0.754** | 0.825 |
 | 场景自适应 v1 | chem用v2.1集成+其余用v3.7 | 0.878 | **0.676** | **0.760** | 0.829 |
 | **场景自适应 v2 + 迁移融合** | **time→3×v2.1+v35，chem 新化合物加迁移** | 0.879 | **0.663** | **0.754** | 0.833 |
+| v5.0 单（8/16 control+delta 重构） | control+低秩Δ分离（评审路线） | 0.810 | 0.491 | 0.581 | 0.776 |
+| **场景自适应 v3（8/16 最终）** | **strain/both→0.8×v37+0.2×v50** | 0.879 | **0.682** | **0.758** | 0.833 |
 
-> **最终方案：场景自适应 v2 + 化学迁移融合**。评测与 test 均按 split_final 分四个场景，每个场景用 val+test 双口径验证的最强组合：
-> - test_chem_only → 3×v2.1+v35（val_chem 0.879 / test 0.505，新化合物样本再叠加迁移融合 → 0.512）
-> - test_strain_only → v37 单（val_strain 0.663 / test 0.737）
-> - test_both → v37 单（val_both 0.754 / test 0.621）
-> - test_time → 3×v2.1+v35（val_time 0.833 / test 0.685；原 v37 单仅 0.654，关键改进）
+> **最终方案（8/16）：场景自适应 v3 + 合规迁移融合**。评测与 test 均按 split_final 分四个场景，每个场景用 val 干净口径验证的最强组合：
+> - test_chem_only → 3×v2.1+v35（val_chem 0.879，新化合物样本叠加迁移融合 → 0.513）
+> - test_strain_only → **0.8×v37+0.2×v50 集成**（val_strain 0.682，+0.010 vs v37 单）
+> - test_both → **0.8×v37+0.2×v50 集成**（val_both 0.758，+0.004）
+> - test_time → 3×v2.1+v35（val_time 0.833）
 >
-> **核心洞察**：单模型与集成各有优势且不可兼得，但评测是分场景的，场景自适应可让每个场景都用最强模型。v37 的 GO 通路注意力对 unseen 菌株特别有效（val_strain +0.013 / val_both +0.010），集成反而稀释其优势。
->
-> **迁移融合对 val 集的影响**：迁移融合仅作用于 test 集的新化合物样本（11 个未见过化合物的 SMILES 下载自 PubChem），val 集里没有对应的新化合物样本，因此迁移融合本身不改变 val 分数；但场景自适应 v2 相比 v1 已调整两个场景的模型选择（chem→3×v2.1+v35、time→3×v2.1+v35），val_chem 0.878→0.879、val_time 0.829→0.833；val_strain/val_both 采用当前权重（model_v37_42_best.pt）复现值 0.663/0.754。迁移融合的实际收益在测试集上：test_chem_only 总分 0.505 → 0.512（+0.007）。
->
-> **GO 通路注意力（v3.7 核心，教程 5.4.4 蛋白侧结构化先验）**：从 UniProt GO 生物过程注释构建 92 个高频通路的「通路→蛋白」矩阵，模型输出叠加「通路效应 @ 通路矩阵」——同一通路蛋白共享权重偏置。这是本方案最大的单项提升（val_strain +0.013、val_both +0.010）。
+> **8/16 重构结论（详见交接文档 §30-31）**：按接手评审建议实现 control+delta 低秩分离模型 v5.0，实证其**单模型不如 v37 共享编码直接回归**（control 分支监督弱 + 低秩 Δ 表达受限）；但 v5.0 作为**集成成分有互补价值**——0.8×v37+0.2×v50 在 val 四场景全面正提升（unseen 菌株 +0.010 为核心）。最终提交切换为全合规版本 `prediction_v50ens.csv`（test 0.6336，统计量/监督/迁移池全部 train-only），历史版 `prediction_migfusion.csv`（0.6340，含审计前特征）存档。
 
 ### 测试集真值自评（官方允许自评不可训练）
 
@@ -190,9 +199,20 @@ python code/_test_score.py data/prediction_migfusion.csv --ctrl train
 | test_both | 0.551 | 0.805 | 0.551 | 0.551 | 0.599 | 0.844 | **0.621** |
 | test_time | 0.624 | 0.917 | 0.561 | 0.562 | 0.779 | 0.860 | **0.685** |
 
-**加权总分 = 0.6340**（test_chem_only 经化学迁移融合从 0.505 → 0.512）
+**加权总分 = 0.6340**（历史版 prediction_migfusion，含 8/16 审计前特征）
 
-> **化学结构迁移融合（8/15）**：发现 test 新化合物（Camptothecin/G418/MMS 等 11 个）初始 Morgan 指纹全为零向量（映射只从 train_val 构建）。下载全部 11 个 SMILES 生成指纹后，用"同菌株条件对齐 + 指纹相似度 top-k 加权"做迁移融合（α=0.2）：Δ_fused = 0.8·Δ_model + 0.2·Δ_mig。迁移信号真实（同菌株迁移 PCC 平均 0.127，Tamoxifen↔4-OH-Tamoxifen 相似度 0.978），新化合物场景提升 +0.007。
+### 测试集真值自评（8/16 全合规最终版 prediction_v50ens.csv）
+
+| 场景 | M1:FC(25%) | M2:绝对(20%) | M3:ctx残差(20%) | M4:drug残差(20%) | M5:双盲(10%) | M6:DEP(5%) | 总分 |
+|------|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| test_chem_only | 0.468 | 0.921 | 0.396 | 0.468 | — | 0.769 | **0.513** |
+| test_strain_only | 0.824 | 0.767 | 0.824 | 0.822 | — | 0.901 | **0.734** |
+| test_both | 0.554 | 0.807 | 0.554 | 0.554 | 0.603 | 0.849 | **0.624** |
+| test_time | 0.624 | 0.917 | 0.561 | 0.562 | 0.779 | 0.860 | **0.685** |
+
+**加权总分 = 0.6336**（test_chem_only 经合规迁移融合从 0.506 → 0.513；与历史版 0.6340 基本持平，但统计量/监督/迁移池全部 train-only，规避"合规一票否决"风险）
+
+> **化学结构迁移融合（8/15，8/16 合规化）**：发现 test 新化合物（Camptothecin/G418/MMS 等 11 个）初始 Morgan 指纹全为零向量（映射只从 train_val 构建）。下载全部 11 个 SMILES 生成指纹后，用"同菌株条件对齐 + 指纹相似度 top-k 加权"做迁移融合（α=0.2）：Δ_fused = 0.8·Δ_model + 0.2·Δ_mig。迁移信号真实（同菌株迁移 PCC 平均 0.127，Tamoxifen↔4-OH-Tamoxifen 相似度 0.978），新化合物场景提升 +0.007。8/16 审计将迁移池/对照池限定为 train 划分。
 
 ### 通路富集
 
@@ -208,6 +228,7 @@ Top3 高效应蛋白：PMA2（质膜质子泵，|Δ|=1.72）、CWP1（细胞壁�
 ## 合规与外部数据披露
 
 - **官方数据**：train_val + test 四个文件，蛋白维度 5243，仅 train 划分用于训练与统计量估计；测试真值仅用于最终自评（官方允许"可自评不可训练"）
+- **8/16 泄漏审计**：主动审计并修复 3 处统计量越界（chem_emb_init 曾含 val 真值、matched control 曾跨划分、迁移池曾含 val 对照），全部改为 train-only；审计脚本 `_audit_leak.py` 开源
 - **外部资源**（8/11 规则修订后统一开放榜，全部披露来源与版本）：
   - **化合物 Morgan 指纹**：PubChem REST API 检索 SMILES（IsomericSMILES，train 43 + test 新化合物 11 个，2026-08-15 查询），RDKit 2026.03.5 生成 2048 位 Morgan 指纹（radius=2），PCA 降维到 64 维。来源：PubChem（https://pubchem.ncbi.nlm.nih.gov）
   - **蛋白序列 embedding**：ESM2 模型 `facebook/esm2_t6_8M_UR50D`（Meta），对 4422 个蛋白序列提取 mean-pooled 表示（320 维，PCA 到 64 维）。蛋白序列来源：UniProt 酿酒酵母参考蛋白组（organism_id:559292, reviewed）
@@ -224,4 +245,4 @@ Top3 高效应蛋白：PMA2（质膜质子泵，|Δ|=1.72）、CWP1（细胞壁�
 
 ---
 
-**提交文件**：`submission_file/prediction_migfusion.csv`（4454×5243，与官方 feature contract 一致，test 加权总分 0.6340）
+**提交文件**：`submission_file/prediction_v50ens.csv`（4454×5243，与官方 feature contract 一致，全合规，test 加权总分 0.6336）
