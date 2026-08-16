@@ -15,8 +15,10 @@ DATA = r"D:\leiyuanze\Datawhale\AI for Research\虚拟细胞\vcell\data"
 DEV = 'cuda' if torch.cuda.is_available() else 'cpu'
 _SEED = int(sys.argv[1]) if len(sys.argv) > 1 else 42
 _GATE_MODE = sys.argv[2] if len(sys.argv) > 2 else 'hard'  # 'hard' / 'rel'（步骤12）
+_D_LOWRANK = int(sys.argv[3]) if len(sys.argv) > 3 else 64  # ★ gpt2 步骤5: d=16/32/64/128 测试
+_EPI = len(sys.argv) > 4 and sys.argv[4] == 'epi'  # ★ gpt1 阶段3: leave-entity-out episodic training
 torch.manual_seed(_SEED); np.random.seed(_SEED)
-print(f"[设备] {DEV} | seed={_SEED} | gate_mode={_GATE_MODE}", flush=True)
+print(f"[设备] {DEV} | seed={_SEED} | gate_mode={_GATE_MODE} | d={_D_LOWRANK} | epi={_EPI}", flush=True)
 
 meta = pd.read_pickle(f"{DATA}/meta.pkl")
 y_log2 = np.load(f"{DATA}/y_log2.npy").astype(np.float32)
@@ -80,7 +82,6 @@ delta_mask = np.isfinite(delta_train).astype(np.float32)
 print(f"[Δ] 有效 Δ 值 {delta_mask.sum()/1e6:.2f}M / {delta_filled.shape}", flush=True)
 
 from sklearn.decomposition import TruncatedSVD
-_D_LOWRANK = int(sys.argv[3]) if len(sys.argv) > 3 else 64  # ★ gpt2 步骤5: d=16/32/64/128 测试
 print("[低秩基] 训练集 Δ SVD ...", flush=True)
 svd = TruncatedSVD(n_components=_D_LOWRANK, random_state=42)
 svd.fit(delta_filled)
@@ -337,6 +338,17 @@ def freeze_resp(model, freeze):
             p.requires_grad = not freeze
 
 best_score = float('inf')
+
+# ---------- ★ gpt1 阶段3：leave-entity-out episodic training 准备 ----------
+# 实体 id（train 全样本）与 holdout 采样实体集合（train 处理样本的实体）
+chem_ids_train = feats['chem_id'][train_idx]
+strain_ids_train = feats['strain_id'][train_idx]
+train_chems = np.unique(feats['chem_id'][train_treat])
+train_strains = np.unique(feats['strain_id'][train_treat])
+EPI_BETA = 0.5          # episodic 损失总权重（Δ+FC）
+EPI_BETA_BOTH = 0.8     # S3 双新样本额外加权
+print(f"[episodic] 训练实体: {len(train_chems)} 化合物 / {len(train_strains)} 菌株, β={EPI_BETA}/{EPI_BETA_BOTH}", flush=True)
+
 for ep in range(1, EPOCHS + 1):
     phase = 'A' if ep <= EPOCHS_A else ('B' if ep <= EPOCHS_A + EPOCHS_B else 'C')
     if phase == 'A':
@@ -367,6 +379,11 @@ for ep in range(1, EPOCHS + 1):
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=15, min_lr=1e-5)
 
     model.train()
+    # ★ episodic：每 epoch 随机 holdout 一个化合物 + 一个菌株（S1/S2/S3 模拟，B/C 阶段）
+    epi_holdout_chem = None; epi_holdout_strain = None
+    if _EPI and phase in ('B', 'C'):
+        epi_holdout_chem = int(np.random.choice(train_chems))
+        epi_holdout_strain = int(np.random.choice(train_strains))
     perm = np.random.permutation(len(train_idx))
     total_loss = 0.0; n_batch = 0
     pbar = tqdm(range(0, len(perm), BATCH), desc=f"Ep {ep}/{EPOCHS}[{phase}]", leave=False, ncols=100, file=sys.stdout)
@@ -409,16 +426,50 @@ for ep in range(1, EPOCHS + 1):
         loss_reg = sum(p.pow(2).sum() for n, p in model.named_parameters() if 'resid' in n)
         loss_reg_w = 1e-3 * loss_reg
 
+        # ★ gpt1 阶段3：episodic loss——把 batch 中属于 holdout 实体的样本视为 unseen 重算 Δ，
+        #   直接优化 S1（新化合物）/S2（新菌株）/S3（双新）的外推损失
+        loss_epi = torch.tensor(0.0, device=DEV)
+        if _EPI and phase in ('B', 'C') and (epi_holdout_chem is not None):
+            q_chem = chem_ids_train[b] == epi_holdout_chem
+            q_strain = strain_ids_train[b] == epi_holdout_strain
+            # ★ 只取 treatment 样本（y_ctrl_train_t/delta 目标按 treatment 对齐，control 索引会越界）
+            qmask = (q_chem | q_strain) & treat_in_train[b]
+            if qmask.any():
+                ql = np.where(qmask)[0]
+                xq = make_x(train_idx[b[ql]])
+                # 非 in-place 覆盖 seen（避免 CUDA numpy-bool 索引赋值触发 device assert）
+                qc = torch.from_numpy(q_chem[ql]).float().to(DEV)
+                qs = torch.from_numpy(q_strain[ql]).float().to(DEV)
+                xq['seen'][0] = xq['seen'][0] * (1.0 - qc)
+                xq['seen'][1] = xq['seen'][1] * (1.0 - qs)
+                dq = model.delta_predict(xq)
+                yq = y_ctrl_pred[ql] + dq
+                ytq, mq = y_train_t[b[ql]], m_train_t[b[ql]]
+                isq_treat = treat_in_train[b[ql]]
+                le = torch.tensor(0.0, device=DEV)
+                if isq_treat.any():
+                    dqq = np.where(isq_treat)[0]
+                    le = le + masked_mse(dq[dqq], delta_target_full[b[ql[dqq]]], delta_mask_full[b[ql[dqq]]])
+                ycq = y_ctrl_train_t[b[ql]]
+                fc_okq = torch.isfinite(ycq).any(dim=1)
+                if fc_okq.any():
+                    le = le + fc_corr_loss(yq[fc_okq], ytq[fc_okq], mq[fc_okq], ycq[fc_okq])
+                # S3 双新样本占比高时用更高权重（EPI_BETA_BOTH），否则 EPI_BETA
+                both_q = q_chem[ql] & q_strain[ql]
+                loss_epi = (EPI_BETA_BOTH if both_q.mean() >= 0.5 else EPI_BETA) * le
+
         if phase == 'A':
             loss = loss_ctrl  # control 预训练
         elif phase == 'B':
             loss = (0.3 * loss_y + 0.35 * loss_delta + 0.15 * loss_fc
                     + 0.1 * loss_ctx + 0.1 * loss_drug
-                    + 0.1 * loss_prot + 0.05 * loss_graph + loss_reg_w)
+                    + 0.1 * loss_prot + 0.05 * loss_graph + loss_reg_w
+                    + loss_epi)
         else:
             loss = (0.3 * loss_y + 0.15 * loss_ctrl + 0.35 * loss_delta + 0.15 * loss_fc
                     + 0.1 * loss_ctx + 0.1 * loss_drug
-                    + 0.1 * loss_prot + 0.05 * loss_graph + loss_reg_w)
+                    + 0.1 * loss_prot + 0.05 * loss_graph + loss_reg_w
+                    + loss_epi)
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)

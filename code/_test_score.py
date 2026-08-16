@@ -206,13 +206,36 @@ for scene in scenes:
     mod5 = max(mod5, 0) if mod5 is not None else None
 
     hi = np.abs(dt) > 1
-    dep_acc = 0.0; dep_pcc = 0.0
+    dep_acc = 0.0; dep_pcc = 0.0; dep_f1k = 0.0
     if hi.sum() > 0:
         dp_hi = dp[hi & fc_ok]; dt_hi = dt[hi & fc_ok]
         if len(dp_hi) > 10:
             dep_acc = float((np.sign(dp_hi) == np.sign(dt_hi)).mean())
             dep_pcc = safe_pcc(dp_hi.ravel(), dt_hi.ravel())
-    mod6 = 0.5 * dep_acc + 0.5 * max(dep_pcc, 0)
+            # F1@K：逐样本按 |Δ_pred| 排序取固定 top-K（50/100/200 三档均值），
+            # precision/recall 分离，避免「全报阳性」刷高召回（官方规则明确要求）
+            f1s = []
+            for K in (50, 100, 200):
+                f1k = []
+                for s in range(len(pos_arr)):
+                    ok = fc_ok[s]
+                    if ok.sum() < 5:
+                        continue
+                    dp_s = dp[s][ok]; dt_s = dt[s][ok]
+                    hi_s = np.abs(dt_s) > 1
+                    if hi_s.sum() == 0:
+                        continue
+                    order = np.argsort(-np.abs(dp_s))
+                    pred_hi = np.zeros(len(dp_s), dtype=bool)
+                    pred_hi[order[:min(K, len(dp_s))]] = True
+                    tp = (pred_hi & hi_s).sum()
+                    prec = tp / max(pred_hi.sum(), 1)
+                    rec = tp / hi_s.sum()
+                    f1k.append(2 * prec * rec / (prec + rec) if prec + rec > 0 else 0.0)
+                if f1k:
+                    f1s.append(float(np.mean(f1k)))
+            dep_f1k = float(np.mean(f1s)) if f1s else 0.0
+    mod6 = 0.4 * dep_acc + 0.3 * max(dep_pcc, 0) + 0.3 * dep_f1k
 
     total = 0.25*mod1 + 0.20*mod2 + 0.20*mod3 + 0.20*mod4
     if mod5 is not None:
