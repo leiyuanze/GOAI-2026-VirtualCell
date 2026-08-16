@@ -30,8 +30,8 @@ train_mask = meta['split_final'].eq('train').values
 # ---------- ctx_prior 预加载（02_features 已计算，直接取）----------
 ctx_prior_all = np.nan_to_num(feats['ctx_prior'].astype(np.float32), nan=0.0)  # (N, P)
 
-# ---------- matched control 预计算 ----------
-ctrl_idx = np.where(meta['role'].eq('control').values)[0]
+# ---------- matched control 预计算（★ 8/16 泄漏修复：训练监督仅 train 划分对照）----------
+ctrl_idx = np.where(meta['role'].eq('control').values & train_mask)[0]
 ctrl_key = (meta.iloc[ctrl_idx]['data_source'].astype(str) + '|' + meta.iloc[ctrl_idx]['instrument'].astype(str) + '|'
             + meta.iloc[ctrl_idx]['Yeast_cell_plate'].astype(str) + '|' + meta.iloc[ctrl_idx]['Strains'].astype(str) + '|'
             + meta.iloc[ctrl_idx]['Medium'].astype(str) + '|' + meta.iloc[ctrl_idx]['Temperature'].astype(str) + '|'
@@ -303,10 +303,10 @@ for ep in range(1, EPOCHS + 1):
     lr_now = optimizer.param_groups[0]['lr']
     if ep % 10 == 0 or ep == EPOCHS:
         evaluate(ep)
-        torch.save(model.state_dict(), f"{DATA}/model_v37.pt")
+        torch.save(model.state_dict(), f"{DATA}/model_v37_{_SEED}.pt")
     if avg_loss < best_score:
         best_score = avg_loss
-        torch.save(model.state_dict(), f"{DATA}/model_v37_best.pt")
+        torch.save(model.state_dict(), f"{DATA}/model_v37_{_SEED}_best.pt")
     w_mse_f, w_fc_f, w_ctx_f, w_drug_f = model.loss_weights()
     print(f"  avg_loss={avg_loss:.4f}  lr={lr_now:.2e}  w[mse={w_mse_f.item():.2f} fc={w_fc_f.item():.2f} ctx={w_ctx_f.item():.2f} drug={w_drug_f.item():.2f}]", flush=True)
 

@@ -71,7 +71,9 @@ d_s = min(16, len(strains) - 1)
 strain_emb_init = (U_s[:, :d_s] * S_s[:d_s]).astype(np.float32)
 
 # matched control 查找表（Δ 先验）
-ctrl_idx = np.where(meta['role'].eq('control').values)[0]
+# ★ 泄漏修复（8/16 审计）：ctrl_idx 必须限制 train 划分——此前全量 lookup 使
+#   12 个训练处理样本的对照监督来自 val_time 真值（soft label leakage）
+ctrl_idx = np.where(meta['role'].eq('control').values & train_mask)[0]
 ctrl_key = (meta.iloc[ctrl_idx]['data_source'].astype(str) + '|' + meta.iloc[ctrl_idx]['instrument'].astype(str) + '|'
             + meta.iloc[ctrl_idx]['Yeast_cell_plate'].astype(str) + '|' + meta.iloc[ctrl_idx]['Strains'].astype(str) + '|'
             + meta.iloc[ctrl_idx]['Medium'].astype(str) + '|' + meta.iloc[ctrl_idx]['Temperature'].astype(str) + '|'
@@ -91,19 +93,22 @@ def matched_control(sid):
     with np.errstate(invalid='ignore'):
         return np.where(cm.sum(0) > 0, np.nansum(np.where(cm, cvals, np.nan), 0) / cm.sum(0), np.nan)
 
-treat_idx = np.where(meta['role'].eq('treatment').values)[0]
+# ★ 泄漏修复（8/16 审计）：treat_idx 必须限制 train 划分——此前 7884 个处理行
+#   含 2806 个 val 行（36%），chem_delta_mean → chem_emb_init 直接编码了
+#   val_chem_only 化合物的真实平均响应，val_chem_only 分数虚高
+treat_idx = np.where(meta['role'].eq('treatment').values & train_mask)[0]
 delta = np.full((len(treat_idx), P), np.nan)
 for i, sid in enumerate(treat_idx):
     cm = matched_control(sid)
     if cm is not None:
         delta[i] = tr_y[sid] - cm
 dmean = np.nanmean(delta)
-print(f"[Δ] 有效 Δ 值 {np.isfinite(delta).sum()/1e6:.2f}M")
+print(f"[Δ] 有效 Δ 值 {np.isfinite(delta).sum()/1e6:.2f}M (仅 train 划分)")
 
 chem_delta_mean = np.full((len(chems), P), np.nan)
 pos_map = {v: k for k, v in enumerate(treat_idx)}
 for i, c in enumerate(chems):
-    rows = np.where((meta['perturbation_no_concentration'].values == c) & meta['role'].eq('treatment').values)[0]
+    rows = np.where((meta['perturbation_no_concentration'].values == c) & meta['role'].eq('treatment').values & train_mask)[0]
     sel = [pos_map[r] for r in rows if r in pos_map]
     if sel:
         chem_delta_mean[i] = np.nanmean(delta[sel], axis=0)

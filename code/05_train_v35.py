@@ -108,18 +108,36 @@ resid_drug = np.where(np.isnan(resid_drug), 0.0, resid_drug).astype(np.float32)
 mask_resid = np.isfinite(delta_treat[treat_pos]) & np.isfinite(mu_ctx[treat_pos]) & (mu_ctx[treat_pos] != 0)
 mask_resid_drug = np.isfinite(delta_treat[treat_pos]) & np.isfinite(mu_drug[treat_pos]) & (mu_drug[treat_pos] != 0)
 
-# ---------- 特征张量 ----------
+# ---------- 预加载特征到 GPU（加速训练，避免每 batch 搬运）----------
+_feat_g = {
+    'strain_id': torch.from_numpy(feats['strain_id']).to(DEV),
+    'chem_id': torch.from_numpy(feats['chem_id']).to(DEV),
+    'chem_hash': torch.from_numpy(feats['chem_hash']).to(DEV),
+    'medium_onehot': torch.from_numpy(feats['medium_onehot']).to(DEV),
+    'temp_norm': torch.from_numpy(feats['temp_norm']).to(DEV),
+    'time_feat': torch.from_numpy(feats['time_feat']).to(DEV),
+    'sm_id': torch.from_numpy(feats['sm_id']).to(DEV),
+    'ct_id': torch.from_numpy(feats['ct_id']).to(DEV),
+    'src_id': torch.from_numpy(feats['src_id']).to(DEV),
+    'ins_id': torch.from_numpy(feats['ins_id']).to(DEV),
+    'plt_id': torch.from_numpy(feats['plt_id']).to(DEV),
+    'chem_seen': torch.from_numpy(feats['chem_seen']).to(DEV),
+    'strain_seen': torch.from_numpy(feats['strain_seen']).to(DEV),
+    'ctx_prior': torch.from_numpy(ctx_prior_all).to(DEV),
+    'chem_morgan': torch.from_numpy(feats['chem_morgan']).to(DEV),
+}
+print(f"[GPU] 特征预加载完成，显存 {torch.cuda.memory_allocated()/1e9:.2f}GB", flush=True)
+
 def make_x(idx):
+    f = _feat_g
     return {
-        'bio': [torch.from_numpy(feats['strain_id'][idx]), torch.from_numpy(feats['chem_id'][idx]),
-                torch.from_numpy(feats['chem_hash'][idx]), torch.from_numpy(feats['medium_onehot'][idx]),
-                torch.from_numpy(feats['temp_norm'][idx]), torch.from_numpy(feats['time_feat'][idx]),
-                torch.from_numpy(feats['sm_id'][idx]), torch.from_numpy(feats['ct_id'][idx])],
-        'ctx': [torch.from_numpy(feats['src_id'][idx]), torch.from_numpy(feats['ins_id'][idx]),
-                torch.from_numpy(feats['plt_id'][idx])],
-        'seen': [torch.from_numpy(feats['chem_seen'][idx]), torch.from_numpy(feats['strain_seen'][idx])],
-        'ctx_prior': torch.from_numpy(ctx_prior_all[idx]),
-        'chem_morgan': torch.from_numpy(feats['chem_morgan'][idx]),
+        'bio': [f['strain_id'][idx], f['chem_id'][idx], f['chem_hash'][idx],
+                f['medium_onehot'][idx], f['temp_norm'][idx], f['time_feat'][idx],
+                f['sm_id'][idx], f['ct_id'][idx]],
+        'ctx': [f['src_id'][idx], f['ins_id'][idx], f['plt_id'][idx]],
+        'seen': [f['chem_seen'][idx], f['strain_seen'][idx]],
+        'ctx_prior': f['ctx_prior'][idx],
+        'chem_morgan': f['chem_morgan'][idx],
     }
 
 # ---------- 模型 ----------
@@ -191,13 +209,7 @@ def evaluate(ep):
             continue
         x = make_x(idx)
         with torch.no_grad():
-            xd = {}
-            for k, v in x.items():
-                if k in ('ctx_prior', 'chem_morgan'):
-                    xd[k] = v.to(DEV)
-                else:
-                    xd[k] = [t.to(DEV) for t in v]
-            pred = model(xd).cpu().numpy()
+            pred = model(x).cpu().numpy()
         yt, m = y_log2[idx], mask[idx].astype(bool)
         valid = m & np.isfinite(pred)
         rmse = float(np.sqrt(((yt[m] - pred[m]) ** 2).mean()))
@@ -251,8 +263,7 @@ for ep in range(1, EPOCHS + 1):
     for i in pbar:
         b = perm[i:i + BATCH]
         x = make_x(train_idx[b])
-        x_gpu = {k: (v.to(DEV) if k in ('ctx_prior', 'chem_morgan') else [t.to(DEV) for t in v]) for k, v in x.items()}
-        pred = model(x_gpu)
+        pred = model(x)
         yt, m = y_train_t[b], m_train_t[b]
         loss_mse = (mse_loss(pred, yt) * m).sum() / m.sum()
         w_mse, w_fc, w_ctx, w_drug = model.loss_weights()
@@ -272,8 +283,8 @@ for ep in range(1, EPOCHS + 1):
         # 组件级监督
         if is_treat.any():
             pos = np.where(is_treat)[0]
-            yB, yS, yC, yT = model.components({k: (v[pos].to(DEV) if k in ('ctx_prior', 'chem_morgan') else [t[pos].to(DEV) for t in v])
-                                                for k, v in x_gpu.items()})
+            yB, yS, yC, yT = model.components({k: (v[pos] if k in ('ctx_prior', 'chem_morgan') else [t[pos] for t in v])
+                                                for k, v in x.items()})
             loss_ctx_val = corr_loss(yC, resid_ctx_t[b[pos]], mask_resid_t[b[pos]])
             loss_drug_val = corr_loss(yT, resid_drug_t[b[pos]], mask_resid_drug_t[b[pos]])
             loss += w_ctx * loss_ctx_val + w_drug * loss_drug_val

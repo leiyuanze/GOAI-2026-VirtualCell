@@ -11,7 +11,7 @@ import pandas as pd
 
 BASE = r"D:\leiyuanze\Datawhale\AI for Research\虚拟细胞\input"
 DATA = r"D:\leiyuanze\Datawhale\AI for Research\虚拟细胞\vcell\data"
-SRC = "prediction_ensemble6.csv"   # 07e 生成，4454 x 4422
+SRC = "prediction_adaptive.csv"   # 07f 生成，4454 x 4422
 DST = "prediction_final_5243.csv"  # 最终提交，4454 x 5243
 
 # 官方蛋白列顺序（test 与 train_val 一致）

@@ -58,6 +58,8 @@ _feat_g = {
     'strain_seen': torch.from_numpy(feats['strain_seen']).to(DEV),
     'ctx_prior': torch.from_numpy(ctx_prior_all).to(DEV),
     'chem_morgan': torch.from_numpy(feats['chem_morgan']).to(DEV),
+    'chem_desc': torch.from_numpy(feats['chem_desc'].astype(np.float32)).to(DEV),
+    'strain_dist_vec': torch.from_numpy(feats['strain_dist_vec'].astype(np.float32)).to(DEV),
 }
 
 def make_x(idx):
@@ -70,6 +72,8 @@ def make_x(idx):
         'seen': [f['chem_seen'][idx], f['strain_seen'][idx]],
         'ctx_prior': f['ctx_prior'][idx],
         'chem_morgan': f['chem_morgan'][idx],
+        'chem_desc': f['chem_desc'][idx],
+        'strain_dist_vec': f['strain_dist_vec'][idx],
     }
 
 _spec37 = importlib.util.spec_from_file_location("m37", r"D:\leiyuanze\Datawhale\AI for Research\虚拟细胞\vcell\04_model_v37.py")
