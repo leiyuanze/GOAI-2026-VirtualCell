@@ -77,6 +77,20 @@ for i in np.where(is_train)[0]:
 for k in drug_global_mu:
     drug_global_mu[k] = np.nanmean(np.stack(drug_global_mu[k]), axis=0)
 
+# ★ 迁移 2.0（gpt3 §五.3 / opus3 路线2）：上下文均值池（菌株|培养基|温度|时间 → Δ 均值）
+tr_ctx = (meta['Strains'].astype(str).values[treat_all] + '|' + meta['Medium'].astype(str).values[treat_all] + '|'
+          + meta['Temperature'].astype(str).values[treat_all] + '|' + meta['pert_time'].astype(str).values[treat_all])
+ctx_mu_pool = {}
+for i in np.where(is_train)[0]:
+    ctx_mu_pool.setdefault(tr_ctx[i], []).append(delta_tr[i])
+for k in ctx_mu_pool:
+    ctx_mu_pool[k] = np.nanmean(np.stack(ctx_mu_pool[k]), axis=0)
+global_delta_mu = np.nanmean(np.stack([delta_tr[i] for i in np.where(is_train)[0]]), axis=0)
+
+def ctx_mu_of(strain, med, temp, time):
+    """上下文处理均值（train-only）；无匹配回退全局"""
+    return ctx_mu_pool.get(f'{strain}|{med}|{temp}|{time}', global_delta_mu)
+
 def mig_mu_of(strain, med, tc):
     """迁移 μ 回退链：同菌株 → 同培养基 → 全局（gpt2 步骤10 优先级 3/4 级）"""
     mu = drug_strain_mu.get((strain, tc))
@@ -103,8 +117,10 @@ def topk_sim(test_c, k=5):
     return sims[:k]
 
 def alpha_of(sim):
-    """★ 自适应 α：val 验证形式（_mig_val_sweep.py）"""
-    return 0.1 + 0.2 * min(max((sim - 0.1) / 0.4, 0.0), 1.0)
+    """★ 迁移 2.0 α（gpt3 §五.4 / opus1 5.1）：α=0.4·clip((sim−0.35)/0.65)，sim<0.35 不迁移"""
+    if sim < 0.35:
+        return 0.0
+    return 0.4 * min(max((sim - 0.35) / 0.65, 0.0), 1.0)
 
 def matched_control_mean(rows_src, src):
     cvals = src[rows_src]; cm = np.isfinite(cvals)
@@ -133,21 +149,27 @@ for i in range(len(tmeta)):
     tops = topk_sim(c)
     if not tops:
         continue
-    alpha = alpha_of(tops[0][0])  # ★ 自适应 α（top-1 相似度）
+    alpha = alpha_of(tops[0][0])  # ★ 迁移 2.0：相似度门槛（S_max<0.35 不迁移）
+    if alpha <= 0:
+        continue
     TAU = 0.1  # ★ gpt2 步骤10：exp(sim/τ) softmax 权重（τ∈{0.05,0.1,0.2}，取 0.1）
-    mus = []; ws = []
+    mus = []; ctxs = []; ws = []
     for sim, tc in tops:
         mu = mig_mu_of(r['Strains'], r['Medium'], tc)  # ★ gpt2 步骤10 回退链
         if mu is None:
             continue
-        mus.append(mu); ws.append(np.exp(sim / TAU))
+        mus.append(mu)
+        ctxs.append(ctx_mu_of(r['Strains'], r['Medium'], r['Temperature'], r['pert_time']))
+        ws.append(np.exp(sim / TAU))
     if not mus:
         continue
     ws = np.array(ws); ws = ws / ws.sum()
-    mig_delta = np.sum(np.stack([w * m for w, m in zip(ws, mus)]), axis=0)
-    mig_delta = np.where(np.isfinite(mig_delta), mig_delta, 0.0)
+    # ★ 迁移 2.0（gpt3 §五.3 / opus3 路线2）：迁移"特异响应" Δ−μ_context，融合时加回 μ_context
+    mig_specific = np.sum(np.stack([w * (m - cmu) for w, m, cmu in zip(ws, mus, ctxs)]), axis=0)
+    mig_specific = np.where(np.isfinite(mig_specific), mig_specific, 0.0)
+    mu_ctx_test = ctx_mu_of(r['Strains'], r['Medium'], r['Temperature'], r['pert_time'])
     model_delta = new[i, pos4422] - yc
-    fused = yc + (1 - alpha) * model_delta + alpha * mig_delta
+    fused = yc + (1 - alpha) * model_delta + alpha * (mu_ctx_test + mig_specific)
     ok = np.isfinite(fused)
     new[i, pos4422[ok]] = fused[ok]
     n_fused += 1
@@ -156,8 +178,4 @@ out = pd.DataFrame(new, index=sub.index, columns=test_cols)
 out.index.name = 'sample_ID'
 assert not out.isna().any().any() and np.isfinite(out.values).all()
 out.to_csv(OUT)
-print(f'[提交] {OUT} 生成 {out.shape} | 融合样本 {n_fused} | 自适应 α ∈ [0.1, 0.3]')
-print('α 分布:', np.round(np.bincount(np.clip(
-    [int(10 * alpha_of(topk_sim(c)[0][0])) for c in sorted(set(
-        tmeta.loc[is_new_chem, "perturbation_no_concentration"])) if topk_sim(c)],
-    1, 3), minlength=4) / 10, 2))
+print(f'[提交] {OUT} 生成 {out.shape} | 融合样本 {n_fused} | α=0.4·clip((sim−0.35)/0.65), sim<0.35 不迁移')

@@ -31,7 +31,7 @@ _s30 = importlib.util.spec_from_file_location('m30', f'{DATA}/../04_model_v30.py
 _m30 = importlib.util.module_from_spec(_s30); _s30.loader.exec_module(_m30)
 _s37 = importlib.util.spec_from_file_location('m37', f'{DATA}/../04_model_v37.py')
 _m37 = importlib.util.module_from_spec(_s37); _s37.loader.exec_module(_m37)
-_s50 = importlib.util.spec_from_file_location('m50', f'{DATA}/../04_model_v50.py')
+_s50 = importlib.util.spec_from_file_location('m50', f'{DATA}/../04_model_v50_v52.py')
 _m50 = importlib.util.module_from_spec(_s50); _s50.loader.exec_module(_m50)
 
 def load_model(path, cls, set_avg=False, **kw):
@@ -48,7 +48,7 @@ MODELS = {
     'v21c': load_model('model_v21_s44.pt', _m21.VCellModel),
     'v35': load_model('model_v35_best.pt', _m30.VCellModel, set_avg=True),
     'v37': load_model('model_v37_42_best.pt', _m37.VCellModel, set_avg=True),
-    'v50': load_model('model_v50_42_best.pt', _m50.VCellModel, set_avg=True, response_basis=U_basis),
+    'v50': load_model('model_v50_42_best_v52.pt', _m50.VCellModel, set_avg=True, response_basis=U_basis),
 }
 print('[模型] 加载完成', flush=True)
 
@@ -83,6 +83,7 @@ tcseen = np.array([1.0 if c in train_chems else 0.0 for c in tmeta['perturbation
 tsseen = np.array([1.0 if s in train_strains else 0.0 for s in tmeta['Strains']], dtype=np.float32)
 tmorgan = feats['test_chem_morgan'].astype(np.float32)
 tdesc = feats['test_chem_desc'].astype(np.float32)
+tsdv = feats['test_strain_dist_vec'].astype(np.float32)  # v5.2 菌株遗传距离
 gmean = feats['gmean']
 ctx_key_tr = (meta['Strains'].astype(str) + '|' + meta['Medium'].astype(str) + '|'
               + meta['Temperature'].astype(str) + '|' + meta['pert_time'].astype(str)).values
@@ -99,8 +100,8 @@ for i, k in enumerate(t_ctx):
         t_ctx_prior[i] = ctx_grp[k]
 t_ctx_prior = np.nan_to_num(t_ctx_prior, nan=0.0)
 
-def tpred_x(names, weights=None):
-    """names: 模型名列表；weights: 可选权重（如 0.8/0.2 集成）"""
+def tpred_x(names, weights=None, pp_w=None):
+    """names: 模型名列表；weights: 可选权重；pp_w: per-protein 权重 (P,)（gpt3 §四 每蛋白收缩融合）"""
     preds = []
     with torch.no_grad():
         for n in names:
@@ -117,22 +118,34 @@ def tpred_x(names, weights=None):
                 x['strain_dist_vec'] = torch.from_numpy(tsdv)
             xg = {k: (v.to(DEV) if k in ('ctx_prior', 'chem_morgan', 'chem_desc', 'strain_dist_vec') else [t.to(DEV) for t in v]) for k, v in x.items()}
             preds.append(MODELS[n](xg).cpu().numpy())
+    if pp_w is not None and len(names) == 2:
+        # 每蛋白收缩融合：pred = w_j·A + (1−w_j)·B
+        return pp_w[None, :] * preds[0] + (1.0 - pp_w)[None, :] * preds[1]
     if weights is None:
         return np.mean(preds, axis=0)
     return np.sum(np.stack(preds) * np.array(weights)[:, None, None], axis=0)
 
-# ---------- 场景映射（★ v5.2 集成：0.75v37+0.25v5.2，8/16 步骤11 后最优）----------
+# ---------- 场景映射（v5.2 集成 0.75v37+0.25v5.2；可选 --pp <kappa> 每蛋白收缩融合）----------
+import sys as _sys
+_PP_KAPPA = int(_sys.argv[1]) if len(_sys.argv) > 1 and _sys.argv[1].isdigit() else None
 SCENE_MODEL = {
     'test_chem_only': (['v21a', 'v21b', 'v21c', 'v35'], None),
     'test_strain_only': (['v37', 'v50'], [0.75, 0.25]),
     'test_both': (['v37', 'v50'], [0.75, 0.25]),
     'test_time': (['v21a', 'v21b', 'v21c', 'v35'], None),
 }
+pp_w = None
+if _PP_KAPPA is not None:
+    pp_w = np.load(f'{DATA}/pp_weight_kappa{_PP_KAPPA}.npy')
+    print(f'[pp] 每蛋白收缩融合 kappa={_PP_KAPPA}, 权重均值 {pp_w.mean():.3f}', flush=True)
 
 pred = np.zeros((len(tmeta), P), dtype=np.float32)
 for scene, (names, weights) in SCENE_MODEL.items():
     idx = np.where(tmeta['split_final'].eq(scene).values)[0]
-    pred[idx] = tpred_x(names, weights)[idx]
+    if pp_w is not None and scene in ('test_strain_only', 'test_both'):
+        pred[idx] = tpred_x(names, None, pp_w)[idx]
+    else:
+        pred[idx] = tpred_x(names, weights)[idx]
 print('[预测] 场景自适应完成', flush=True)
 
 # ---------- 补齐 5243 蛋白列 ----------
@@ -153,6 +166,7 @@ for c in test_cols:
 assert new.shape == (4454, 5243)
 assert not new.isna().any().any() and np.isfinite(new.values).all()
 new.index.name = 'sample_ID'
-new.to_csv(f'{DATA}/prediction_v50ens_base.csv')
-print(f'[提交] prediction_v50ens_base.csv 生成  {new.shape}')
+_out_name = f'prediction_v50ens_base_pp{_PP_KAPPA}.csv' if _PP_KAPPA is not None else 'prediction_v50ens_base.csv'
+new.to_csv(f'{DATA}/{_out_name}')
+print(f'[提交] {_out_name} 生成  {new.shape}')
 print('场景映射:', {k: (v, w) for k, (v, w) in SCENE_MODEL.items()})
