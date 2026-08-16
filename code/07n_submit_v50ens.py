@@ -113,17 +113,19 @@ def tpred_x(names, weights=None):
                 x['ctx_prior'] = torch.from_numpy(t_ctx_prior)
                 x['chem_morgan'] = torch.from_numpy(tmorgan)
                 x['chem_desc'] = torch.from_numpy(tdesc)
-            xg = {k: (v.to(DEV) if k in ('ctx_prior', 'chem_morgan', 'chem_desc') else [t.to(DEV) for t in v]) for k, v in x.items()}
+            if n == 'v50':
+                x['strain_dist_vec'] = torch.from_numpy(tsdv)
+            xg = {k: (v.to(DEV) if k in ('ctx_prior', 'chem_morgan', 'chem_desc', 'strain_dist_vec') else [t.to(DEV) for t in v]) for k, v in x.items()}
             preds.append(MODELS[n](xg).cpu().numpy())
     if weights is None:
         return np.mean(preds, axis=0)
     return np.sum(np.stack(preds) * np.array(weights)[:, None, None], axis=0)
 
-# ---------- 场景映射（★ v50 集成替换 v37 单用于 strain/both）----------
+# ---------- 场景映射（★ v5.2 集成：0.75v37+0.25v5.2，8/16 步骤11 后最优）----------
 SCENE_MODEL = {
     'test_chem_only': (['v21a', 'v21b', 'v21c', 'v35'], None),
-    'test_strain_only': (['v37', 'v50'], [0.8, 0.2]),
-    'test_both': (['v37', 'v50'], [0.8, 0.2]),
+    'test_strain_only': (['v37', 'v50'], [0.75, 0.25]),
+    'test_both': (['v37', 'v50'], [0.75, 0.25]),
     'test_time': (['v21a', 'v21b', 'v21c', 'v35'], None),
 }
 

@@ -14,8 +14,9 @@ from tqdm import tqdm
 DATA = r"D:\leiyuanze\Datawhale\AI for Research\虚拟细胞\vcell\data"
 DEV = 'cuda' if torch.cuda.is_available() else 'cpu'
 _SEED = int(sys.argv[1]) if len(sys.argv) > 1 else 42
+_GATE_MODE = sys.argv[2] if len(sys.argv) > 2 else 'hard'  # 'hard' / 'rel'（步骤12）
 torch.manual_seed(_SEED); np.random.seed(_SEED)
-print(f"[设备] {DEV} | seed={_SEED}", flush=True)
+print(f"[设备] {DEV} | seed={_SEED} | gate_mode={_GATE_MODE}", flush=True)
 
 meta = pd.read_pickle(f"{DATA}/meta.pkl")
 y_log2 = np.load(f"{DATA}/y_log2.npy").astype(np.float32)
@@ -107,6 +108,10 @@ _feat_g = {
     'ctx_prior': torch.from_numpy(ctx_prior_all).to(DEV),
     'chem_morgan': torch.from_numpy(feats['chem_morgan']).to(DEV),
     'chem_desc': torch.from_numpy(feats['chem_desc'].astype(np.float32)).to(DEV),
+    'strain_dist_vec': torch.from_numpy(feats['strain_dist_vec'].astype(np.float32)).to(DEV),
+    'chem_max_sim': torch.from_numpy(feats['chem_max_sim'].astype(np.float32)).to(DEV),
+    'chem_support': torch.from_numpy(feats['chem_support'].astype(np.float32)).to(DEV),
+    'strain_support': torch.from_numpy(feats['strain_support'].astype(np.float32)).to(DEV),
 }
 
 def make_x(idx):
@@ -120,13 +125,17 @@ def make_x(idx):
         'ctx_prior': f['ctx_prior'][idx],
         'chem_morgan': f['chem_morgan'][idx],
         'chem_desc': f['chem_desc'][idx],
+        'strain_dist_vec': f['strain_dist_vec'][idx],
+        'chem_max_sim': f['chem_max_sim'][idx],
+        'chem_support': f['chem_support'][idx],
+        'strain_support': f['strain_support'][idx],
     }
 
 # ---------- 模型 ----------
 import importlib.util
 _spec = importlib.util.spec_from_file_location("m50", r"D:\leiyuanze\Datawhale\AI for Research\虚拟细胞\vcell\04_model_v50.py")
 _m50 = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_m50)
-model = _m50.VCellModel(feats, P=P, response_basis=U_basis).to(DEV)
+model = _m50.VCellModel(feats, P=P, response_basis=U_basis, gate_mode=_GATE_MODE).to(DEV)
 model.set_strain_avg()
 print(f"[模型] 参数 {sum(p.numel() for p in model.parameters())/1e6:.2f}M (v5.0 control+delta低秩)", flush=True)
 

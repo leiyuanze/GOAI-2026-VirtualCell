@@ -10,6 +10,7 @@ import importlib.util
 
 DATA = r"D:\leiyuanze\Datawhale\AI for Research\虚拟细胞\vcell\data"
 CKPT = sys.argv[1] if len(sys.argv) > 1 else f"{DATA}/model_v50_42_best.pt"
+GATE = sys.argv[2] if len(sys.argv) > 2 else 'hard'
 DEV = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 meta = pd.read_pickle(f"{DATA}/meta.pkl")
@@ -60,6 +61,11 @@ _feat_g = {
     'strain_seen': torch.from_numpy(feats['strain_seen']).to(DEV),
     'ctx_prior': torch.from_numpy(ctx_prior_all).to(DEV),
     'chem_morgan': torch.from_numpy(feats['chem_morgan']).to(DEV),
+    'chem_desc': torch.from_numpy(feats['chem_desc'].astype(np.float32)).to(DEV),
+    'strain_dist_vec': torch.from_numpy(feats['strain_dist_vec'].astype(np.float32)).to(DEV),
+    'chem_max_sim': torch.from_numpy(feats['chem_max_sim'].astype(np.float32)).to(DEV),
+    'chem_support': torch.from_numpy(feats['chem_support'].astype(np.float32)).to(DEV),
+    'strain_support': torch.from_numpy(feats['strain_support'].astype(np.float32)).to(DEV),
 }
 
 def make_x(idx):
@@ -72,12 +78,17 @@ def make_x(idx):
         'seen': [f['chem_seen'][idx], f['strain_seen'][idx]],
         'ctx_prior': f['ctx_prior'][idx],
         'chem_morgan': f['chem_morgan'][idx],
+        'chem_desc': f['chem_desc'][idx],
+        'strain_dist_vec': f['strain_dist_vec'][idx],
+        'chem_max_sim': f['chem_max_sim'][idx],
+        'chem_support': f['chem_support'][idx],
+        'strain_support': f['strain_support'][idx],
     }
 
 _spec = importlib.util.spec_from_file_location("m50", r"D:\leiyuanze\Datawhale\AI for Research\虚拟细胞\vcell\04_model_v50.py")
 _m50 = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_m50)
 U_basis = np.load(f"{DATA}/v50_response_basis.npy")
-model = _m50.VCellModel(feats, P=P, response_basis=U_basis).to(DEV)
+model = _m50.VCellModel(feats, P=P, response_basis=U_basis, gate_mode=GATE).to(DEV)
 model.load_state_dict(torch.load(CKPT, map_location=DEV))
 model.set_strain_avg()
 model.eval()
