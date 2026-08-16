@@ -80,10 +80,11 @@ delta_mask = np.isfinite(delta_train).astype(np.float32)
 print(f"[Δ] 有效 Δ 值 {delta_mask.sum()/1e6:.2f}M / {delta_filled.shape}", flush=True)
 
 from sklearn.decomposition import TruncatedSVD
+_D_LOWRANK = int(sys.argv[3]) if len(sys.argv) > 3 else 64  # ★ gpt2 步骤5: d=16/32/64/128 测试
 print("[低秩基] 训练集 Δ SVD ...", flush=True)
-svd = TruncatedSVD(n_components=64, random_state=42)
+svd = TruncatedSVD(n_components=_D_LOWRANK, random_state=42)
 svd.fit(delta_filled)
-U_basis = svd.components_.T.astype(np.float32)  # (P, 64)
+U_basis = svd.components_.T.astype(np.float32)  # (P, d)
 U_basis = U_basis / (np.linalg.norm(U_basis, axis=0, keepdims=True) + 1e-8)
 evr = svd.explained_variance_ratio_.sum()
 print(f"[低秩基] U {U_basis.shape}, Δ 方差解释 {evr*100:.1f}%", flush=True)
@@ -139,7 +140,7 @@ model = _m50.VCellModel(feats, P=P, response_basis=U_basis, gate_mode=_GATE_MODE
 model.set_strain_avg()
 print(f"[模型] 参数 {sum(p.numel() for p in model.parameters())/1e6:.2f}M (v5.0 control+delta低秩)", flush=True)
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)  # ★ gpt2 步骤8: wd 1e-4~1e-3
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=15, min_lr=1e-5)
 mse_loss = nn.MSELoss(reduction='none')
 
@@ -344,10 +345,26 @@ for ep in range(1, EPOCHS + 1):
         freeze_ctrl(model, True); freeze_resp(model, False)
     else:
         freeze_ctrl(model, False); freeze_resp(model, False)
-        # 阶段 C 降低学习率
+        # ★ gpt2 步骤14 阶段C：control 分支 lr=1e-4，其余 3e-4（分组学习率）
         if ep == EPOCHS_A + EPOCHS_B + 1:
+            ctrl_names = ('ctrl_enc', 'fc_ctrl', 'ctrl_bias')
+            for name, p in model.named_parameters():
+                if any(cn in name for cn in ctrl_names):
+                    p_group_lr = 1e-4
+                else:
+                    p_group_lr = 3e-4
+                # 按参数首字母分组近似（简化：直接设置 param.lr 需要 param_groups）
+            # 用 param_groups 精确分组
+            ctrl_params = [p for n, p in model.named_parameters() if any(cn in n for cn in ctrl_names)]
+            resp_params = [p for n, p in model.named_parameters() if not any(cn in n for cn in ctrl_names)]
             for g in optimizer.param_groups:
                 g['lr'] = 3e-4
+            # 重建优化器为两组（control 1e-4 / 其余 3e-4）
+            optimizer = torch.optim.AdamW([
+                {'params': ctrl_params, 'lr': 1e-4, 'weight_decay': 1e-4},
+                {'params': resp_params, 'lr': 3e-4, 'weight_decay': 1e-4},
+            ])
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=15, min_lr=1e-5)
 
     model.train()
     perm = np.random.permutation(len(train_idx))
@@ -388,17 +405,20 @@ for ep in range(1, EPOCHS + 1):
 
         loss_prot = per_protein_corr_loss(y_pred, yt, m)
         loss_graph = graph_reg_loss(y_pred, m, V_graph_t)
+        # ★ gpt2 步骤6/13：残差头 L2 正则 L_reg（低秩输出需残差强正则）
+        loss_reg = sum(p.pow(2).sum() for n, p in model.named_parameters() if 'resid' in n)
+        loss_reg_w = 1e-3 * loss_reg
 
         if phase == 'A':
             loss = loss_ctrl  # control 预训练
         elif phase == 'B':
             loss = (0.3 * loss_y + 0.35 * loss_delta + 0.15 * loss_fc
                     + 0.1 * loss_ctx + 0.1 * loss_drug
-                    + 0.1 * loss_prot + 0.05 * loss_graph)
+                    + 0.1 * loss_prot + 0.05 * loss_graph + loss_reg_w)
         else:
             loss = (0.3 * loss_y + 0.15 * loss_ctrl + 0.35 * loss_delta + 0.15 * loss_fc
                     + 0.1 * loss_ctx + 0.1 * loss_drug
-                    + 0.1 * loss_prot + 0.05 * loss_graph)
+                    + 0.1 * loss_prot + 0.05 * loss_graph + loss_reg_w)
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)

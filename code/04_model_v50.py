@@ -21,6 +21,8 @@ class VCellModel(nn.Module):
         super().__init__()
         self.P = P
         self.latent = latent
+        if response_basis is not None:
+            d_lowrank = response_basis.shape[1]  # ★ 低秩维与 U 基一致（步骤5 d 测试）
         self.d_lowrank = d_lowrank
         self.gate_mode = gate_mode  # 'hard'（v5.0~v5.2 兼容）/ 'rel'（步骤12 可靠性门控）
 

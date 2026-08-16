@@ -111,12 +111,13 @@ for i in range(len(tmeta)):
     if not tops:
         continue
     alpha = alpha_of(tops[0][0])  # ★ 自适应 α（top-1 相似度）
+    TAU = 0.1  # ★ gpt2 步骤10：exp(sim/τ) softmax 权重（τ∈{0.05,0.1,0.2}，取 0.1）
     mus = []; ws = []
     for sim, tc in tops:
         mu = drug_strain_mu.get((r['Strains'], tc))
         if mu is None:
             continue
-        mus.append(mu); ws.append(max(sim, 0.0))
+        mus.append(mu); ws.append(np.exp(sim / TAU))
     if not mus:
         continue
     ws = np.array(ws); ws = ws / ws.sum()

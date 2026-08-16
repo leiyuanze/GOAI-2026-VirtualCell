@@ -111,7 +111,7 @@ def eval_pred(pred_dict):
         out[scene] = (p2, fc)
     return out
 
-seeds = [42, 43, 44]
+seeds = [1, 2, 42, 43, 44]  # gpt2 步骤16: for seed in [1,2,3,4,5]
 results_v51 = {s: {} for s in seeds}
 results_ens = {s: {} for s in seeds}
 for sd in seeds:
@@ -134,7 +134,7 @@ for sd in seeds:
     results_ens[sd] = eval_pred({s: 0.8 * pd_all[s][1] + 0.2 * pd_all[s][0] for s in SCENES})
     print(f"seed {sd} done", flush=True)
 
-print("\n=== 步骤16 多 seed 伪测试（3 seeds）===")
+print("\n=== 步骤16 多 seed 伪测试（5 seeds）===")
 print(f"{'场景':<18}{'v5.1 单 R2':>16}{'v5.1 FC':>14}{'集成 R2':>16}{'集成 FC':>14}")
 for scene in SCENES:
     r51 = [results_v51[s][scene][0] for s in seeds if results_v51[s]]
