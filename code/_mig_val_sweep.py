@@ -130,8 +130,10 @@ new_chems = sorted(set(meta['perturbation_no_concentration'].values[new_idx]))
 for c in new_chems:
     sel = np.where(meta['perturbation_no_concentration'].values[new_idx] == c)[0]
     print(f"\n=== {c} (n={len(sel)}, top1_sim={topk_sim(c)[0][0]:.3f}) ===")
-    for alpha in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]:
-        tops = topk_sim(c)
+    # ★ gpt2 步骤10：top-k 网格 3/5/8/10 × α 网格
+    for k in [3, 5, 8, 10]:
+        for alpha in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]:
+            tops = topk_sim(c, k=k)
         mus, ws = [], []
         for sim, tc in tops:
             mu = drug_strain_mu.get((meta['Strains'].values[new_idx[sel[0]]], tc))
@@ -162,4 +164,4 @@ for c in new_chems:
             r2 = 1 - ((y_log2[new_idx[sel]][ok] - fused[ok]) ** 2).sum() / max(((y_log2[new_idx[sel]][ok] - yc_s[ok]) ** 2).sum(), 1e-12)
         else:
             r2 = float('nan')
-        print(f"  alpha={alpha:.1f}  FC PCC={fc:.4f}  ΔR²(vs yc)={r2:.4f}  (n={n})")
+        print(f"  k={k} alpha={alpha:.1f}  FC PCC={fc:.4f}  ΔR²(vs yc)={r2:.4f}  (n={n})")

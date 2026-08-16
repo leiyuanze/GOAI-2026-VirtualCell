@@ -63,6 +63,29 @@ for i in np.where(is_train)[0]:
     drug_strain_mu.setdefault(key, []).append(delta_tr[i])
 for k in drug_strain_mu:
     drug_strain_mu[k] = np.nanmean(np.stack(drug_strain_mu[k]), axis=0)
+# ★ gpt2 步骤10 迁移优先级：同菌株 → 同培养基 → 全局（回退池）
+tr_med = meta['Medium'].values[treat_all]
+drug_med_mu = {}
+for i in np.where(is_train)[0]:
+    key = (tr_med[i], chem_of[i])
+    drug_med_mu.setdefault(key, []).append(delta_tr[i])
+for k in drug_med_mu:
+    drug_med_mu[k] = np.nanmean(np.stack(drug_med_mu[k]), axis=0)
+drug_global_mu = {}
+for i in np.where(is_train)[0]:
+    drug_global_mu.setdefault(chem_of[i], []).append(delta_tr[i])
+for k in drug_global_mu:
+    drug_global_mu[k] = np.nanmean(np.stack(drug_global_mu[k]), axis=0)
+
+def mig_mu_of(strain, med, tc):
+    """迁移 μ 回退链：同菌株 → 同培养基 → 全局（gpt2 步骤10 优先级 3/4 级）"""
+    mu = drug_strain_mu.get((strain, tc))
+    if mu is not None:
+        return mu
+    mu = drug_med_mu.get((med, tc))
+    if mu is not None:
+        return mu
+    return drug_global_mu.get(tc)
 
 train_chems = sorted(set(chem_of[is_train]))
 def topk_sim(test_c, k=5):
@@ -114,7 +137,7 @@ for i in range(len(tmeta)):
     TAU = 0.1  # ★ gpt2 步骤10：exp(sim/τ) softmax 权重（τ∈{0.05,0.1,0.2}，取 0.1）
     mus = []; ws = []
     for sim, tc in tops:
-        mu = drug_strain_mu.get((r['Strains'], tc))
+        mu = mig_mu_of(r['Strains'], r['Medium'], tc)  # ★ gpt2 步骤10 回退链
         if mu is None:
             continue
         mus.append(mu); ws.append(np.exp(sim / TAU))

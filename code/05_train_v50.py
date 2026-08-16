@@ -17,8 +17,11 @@ _SEED = int(sys.argv[1]) if len(sys.argv) > 1 else 42
 _GATE_MODE = sys.argv[2] if len(sys.argv) > 2 else 'hard'  # 'hard' / 'rel'（步骤12）
 _D_LOWRANK = int(sys.argv[3]) if len(sys.argv) > 3 else 64  # ★ gpt2 步骤5: d=16/32/64/128 测试
 _EPI = len(sys.argv) > 4 and sys.argv[4] == 'epi'  # ★ gpt1 阶段3: leave-entity-out episodic training
+_RANK = len(sys.argv) > 5 and sys.argv[5] == 'rank'  # ★ gpt2 步骤13: L_rank 方向损失
+_QUAL_W = len(sys.argv) > 6 and sys.argv[6] == 'qual'  # ★ gpt2 步骤4d: control_quality 加权
+_FP32 = len(sys.argv) > 7 and sys.argv[7] == 'fp32'  # ★ gpt2 步骤9: Morgan+desc 拼接 PCA-32
 torch.manual_seed(_SEED); np.random.seed(_SEED)
-print(f"[设备] {DEV} | seed={_SEED} | gate_mode={_GATE_MODE} | d={_D_LOWRANK} | epi={_EPI}", flush=True)
+print(f"[设备] {DEV} | seed={_SEED} | gate={_GATE_MODE} | d={_D_LOWRANK} | epi={_EPI} | rank={_RANK} | qual={_QUAL_W} | fp32={_FP32}", flush=True)
 
 meta = pd.read_pickle(f"{DATA}/meta.pkl")
 y_log2 = np.load(f"{DATA}/y_log2.npy").astype(np.float32)
@@ -29,44 +32,77 @@ P = y_log2.shape[1]
 train_mask = meta['split_final'].eq('train').values
 tr_y_nan = np.where(mask.astype(bool), y_log2, np.nan)
 
-# ---------- matched control 预计算（★ train-only lookup，泄漏修复）----------
+# ---------- matched control 预计算（★ train-only lookup，泄漏修复 + gpt2 步骤4 回退优先级）----------
 ctrl_idx = np.where(meta['role'].eq('control').values & train_mask)[0]
-ctrl_key = (meta.iloc[ctrl_idx]['data_source'].astype(str) + '|' + meta.iloc[ctrl_idx]['instrument'].astype(str) + '|'
-            + meta.iloc[ctrl_idx]['Yeast_cell_plate'].astype(str) + '|' + meta.iloc[ctrl_idx]['Strains'].astype(str) + '|'
-            + meta.iloc[ctrl_idx]['Medium'].astype(str) + '|' + meta.iloc[ctrl_idx]['Temperature'].astype(str) + '|'
-            + meta.iloc[ctrl_idx]['pert_time'].astype(str)).values
+ctrl_rows_meta = meta.iloc[ctrl_idx]
+ctrl_key = (ctrl_rows_meta['data_source'].astype(str) + '|' + ctrl_rows_meta['instrument'].astype(str) + '|'
+            + ctrl_rows_meta['Yeast_cell_plate'].astype(str) + '|' + ctrl_rows_meta['Strains'].astype(str) + '|'
+            + ctrl_rows_meta['Medium'].astype(str) + '|' + ctrl_rows_meta['Temperature'].astype(str) + '|'
+            + ctrl_rows_meta['pert_time'].astype(str)).values
 ctrl_lookup = {}
 for k, pos in zip(ctrl_key, ctrl_idx):
     ctrl_lookup.setdefault(k, []).append(pos)
+# 回退匹配索引：菌株/培养基/温度/时间 四字段（去平台），供逐级回退
+_cs = ctrl_rows_meta['Strains'].astype(str).values
+_cm_ = ctrl_rows_meta['Medium'].astype(str).values
+_ct_ = ctrl_rows_meta['Temperature'].astype(str).values
+_ctt = ctrl_rows_meta['pert_time'].astype(str).values
 
 def matched_control_mean(sid, use_all=False):
-    """use_all=True 时用全量对照（评估口径，官方 M1 用真实对照）；False 仅 train（训练监督）"""
+    """gpt2 步骤4：按优先级回退匹配对照，返回 (均值, 对照数, 质量)：
+    0 精确（source|ins|plate|strain|med|temp|time）→ 1 同菌株/培养基/温度/时间 → 2 同菌株/培养基/温度
+    → 3 同菌株/培养基 → 4 全局 train 对照均值；quality = 1/(level+1)
+    use_all=True 时用全量对照（评估口径，官方 M1 用真实对照）；False 仅 train（训练监督）"""
     r = meta.iloc[sid]
+    if use_all:
+        raise NotImplementedError('评估口径对照在脚本后部单独实现')
     k = (str(r['data_source']) + '|' + str(r['instrument']) + '|' + str(r['Yeast_cell_plate']) + '|'
          + str(r['Strains']) + '|' + str(r['Medium']) + '|' + str(r['Temperature']) + '|' + str(r['pert_time']))
-    if k not in ctrl_lookup:
-        return None
-    rows = ctrl_lookup[k]
+    if k in ctrl_lookup:
+        rows = ctrl_lookup[k]; lvl = 0
+    else:
+        s_, m_, t_, tt_ = str(r['Strains']), str(r['Medium']), str(r['Temperature']), str(r['pert_time'])
+        sel = np.ones(len(ctrl_idx), dtype=bool)
+        lvl = None
+        for lv, mask_cond in enumerate(
+                [(_cs == s_) & (_cm_ == m_) & (_ct_ == t_) & (_ctt == tt_),
+                 (_cs == s_) & (_cm_ == m_) & (_ct_ == t_),
+                 (_cs == s_) & (_cm_ == m_),
+                 (_cs == s_)]):
+            rows = np.where(mask_cond)[0]
+            if len(rows) > 0:
+                rows = ctrl_idx[rows]; lvl = lv + 1
+                break
+        if lvl is None:
+            rows = ctrl_idx; lvl = 4
     cvals = tr_y_nan[rows]; cm = mask[rows] > 0
     with np.errstate(invalid='ignore'):
-        return np.where(cm.sum(0) > 0, np.nansum(np.where(cm, cvals, np.nan), 0) / cm.sum(0), np.nan)
+        mean = np.where(cm.sum(0) > 0, np.nansum(np.where(cm, cvals, np.nan), 0) / cm.sum(0), np.nan)
+    return mean, len(rows), 1.0 / (lvl + 1)
 
 treat_all = np.where(meta['role'].eq('treatment').values)[0]
-print("[预计算] matched control（train-only）...", flush=True)
+print("[预计算] matched control（train-only，含回退优先级）...", flush=True)
 ctrl_train_only = np.full((len(treat_all), P), np.nan, dtype=np.float32)
+ctrl_n_train = np.zeros(len(treat_all), dtype=np.int32)
+ctrl_quality_train = np.zeros(len(treat_all), dtype=np.float32)
 for i, sid in enumerate(treat_all):
-    cm = matched_control_mean(sid, use_all=False)
+    cm, cn, cq = matched_control_mean(sid, use_all=False)
     if cm is not None:
         ctrl_train_only[i] = cm
+        ctrl_n_train[i] = cn
+        ctrl_quality_train[i] = cq
 pos_of = {sid: i for i, sid in enumerate(treat_all)}
 has_ctrl_train = np.isfinite(ctrl_train_only).any(axis=1)
-print(f"[预计算] 有 train 对照的处理样本: {has_ctrl_train.sum()}/{len(treat_all)}", flush=True)
-
+print(f"[预计算] 有 train 对照的处理样本: {has_ctrl_train.sum()}/{len(treat_all)}"
+      f" | 精确匹配率: {(ctrl_quality_train == 1.0).sum()}/{len(treat_all)}"
+      f" | 质量均值: {ctrl_quality_train[has_ctrl_train].mean():.3f}", flush=True)
 # ---------- 训练集划分 ----------
 train_treat = np.where(train_mask & meta['role'].eq('treatment').values)[0]
 train_ctrl = np.where(train_mask & meta['role'].eq('control').values)[0]
 train_idx = np.concatenate([train_treat, train_ctrl])
 print(f"[训练集] 处理 {len(train_treat)} + 对照 {len(train_ctrl)} = {len(train_idx)}", flush=True)
+# ★ gpt2 步骤4d：control_quality 作为 Δ 监督的样本权重（train_treat 对齐）
+qual_by_train = np.array([ctrl_quality_train[pos_of[s]] for s in train_treat], dtype=np.float32)
 
 y_train = np.where(mask.astype(bool), y_log2, 0.0)[train_idx].astype(np.float32)
 m_train = mask[train_idx].astype(np.float32)
@@ -90,6 +126,8 @@ U_basis = U_basis / (np.linalg.norm(U_basis, axis=0, keepdims=True) + 1e-8)
 evr = svd.explained_variance_ratio_.sum()
 print(f"[低秩基] U {U_basis.shape}, Δ 方差解释 {evr*100:.1f}%", flush=True)
 np.save(f"{DATA}/v50_response_basis.npy", U_basis)
+np.save(f"{DATA}/v50_response_mean.npy", np.nanmean(delta_filled, axis=0).astype(np.float32))  # gpt2 步骤5
+np.save(f"{DATA}/v50_explained_variance.npy", svd.explained_variance_ratio_.astype(np.float32))  # gpt2 步骤5
 
 # ---------- 特征预加载 ----------
 ctx_prior_all = np.nan_to_num(feats['ctx_prior'].astype(np.float32), nan=0.0)
@@ -110,6 +148,7 @@ _feat_g = {
     'ctx_prior': torch.from_numpy(ctx_prior_all).to(DEV),
     'chem_morgan': torch.from_numpy(feats['chem_morgan']).to(DEV),
     'chem_desc': torch.from_numpy(feats['chem_desc'].astype(np.float32)).to(DEV),
+    'chem_fp32': torch.from_numpy(feats['chem_fp32'].astype(np.float32)).to(DEV),
     'strain_dist_vec': torch.from_numpy(feats['strain_dist_vec'].astype(np.float32)).to(DEV),
     'chem_max_sim': torch.from_numpy(feats['chem_max_sim'].astype(np.float32)).to(DEV),
     'chem_support': torch.from_numpy(feats['chem_support'].astype(np.float32)).to(DEV),
@@ -127,6 +166,7 @@ def make_x(idx):
         'ctx_prior': f['ctx_prior'][idx],
         'chem_morgan': f['chem_morgan'][idx],
         'chem_desc': f['chem_desc'][idx],
+        'chem_fp32': f['chem_fp32'][idx],
         'strain_dist_vec': f['strain_dist_vec'][idx],
         'chem_max_sim': f['chem_max_sim'][idx],
         'chem_support': f['chem_support'][idx],
@@ -137,7 +177,7 @@ def make_x(idx):
 import importlib.util
 _spec = importlib.util.spec_from_file_location("m50", r"D:\leiyuanze\Datawhale\AI for Research\虚拟细胞\vcell\04_model_v50.py")
 _m50 = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_m50)
-model = _m50.VCellModel(feats, P=P, response_basis=U_basis, gate_mode=_GATE_MODE).to(DEV)
+model = _m50.VCellModel(feats, P=P, response_basis=U_basis, gate_mode=_GATE_MODE, use_fp32=_FP32).to(DEV)
 model.set_strain_avg()
 print(f"[模型] 参数 {sum(p.numel() for p in model.parameters())/1e6:.2f}M (v5.0 control+delta低秩)", flush=True)
 
@@ -309,6 +349,7 @@ delta_target_full = torch.zeros_like(y_train_t)
 delta_mask_full = torch.zeros_like(m_train_t)
 delta_target_full[treat_in_train] = delta_train_t
 delta_mask_full[treat_in_train] = delta_mask_t
+qual_by_train_t = torch.from_numpy(qual_by_train).to(DEV)  # gpt2 步骤4d control_quality 权重
 
 # 组件监督张量（处理行索引）
 resid_ctx_t = torch.tensor(resid_ctx, device=DEV)
@@ -402,10 +443,24 @@ for ep in range(1, EPOCHS + 1):
         if is_treat.any():
             db = np.where(is_treat)[0]
             loss_delta = masked_mse(delta_pred[db], delta_target_full[b[db]], delta_mask_full[b[db]])
+            # ★ gpt2 步骤4d：control_quality 加权（回退对照的样本降权）
+            if _QUAL_W:
+                wq = qual_by_train_t[b[db]].clamp(min=0.2)
+                diff = ((delta_pred[db] - delta_target_full[b[db]]) ** 2) * delta_mask_full[b[db]]
+                loss_delta = (diff * wq[:, None]).sum() / ((delta_mask_full[b[db]] * wq[:, None]).sum() + 1e-8)
         else:
             loss_delta = torch.tensor(0.0, device=DEV)
         # FC corr（处理样本，train-only 对照）
         loss_fc = torch.tensor(0.0, device=DEV)
+        # ★ gpt2 步骤13: L_rank 方向损失 BCE(σ(βΔ̂), I(Δ>0))——只约束高效应/有效蛋白方向
+        loss_rank = torch.tensor(0.0, device=DEV)
+        if _RANK and is_treat.any():
+            db = np.where(is_treat)[0]
+            p_dir = torch.sigmoid(delta_pred[db])
+            t_dir = (delta_target_full[b[db]] > 0).float()
+            ok_dir = (delta_mask_full[b[db]] > 0) & torch.isfinite(delta_target_full[b[db]])
+            if ok_dir.any():
+                loss_rank = nn.functional.binary_cross_entropy(p_dir[ok_dir], t_dir[ok_dir])
         # ★ 组件级残差监督（gpt2 步骤13）：delta_pred 对齐 LOO μ 残差
         loss_ctx = torch.tensor(0.0, device=DEV)
         loss_drug = torch.tensor(0.0, device=DEV)
@@ -464,12 +519,12 @@ for ep in range(1, EPOCHS + 1):
             loss = (0.3 * loss_y + 0.35 * loss_delta + 0.15 * loss_fc
                     + 0.1 * loss_ctx + 0.1 * loss_drug
                     + 0.1 * loss_prot + 0.05 * loss_graph + loss_reg_w
-                    + loss_epi)
+                    + 0.05 * loss_rank + loss_epi)
         else:
             loss = (0.3 * loss_y + 0.15 * loss_ctrl + 0.35 * loss_delta + 0.15 * loss_fc
                     + 0.1 * loss_ctx + 0.1 * loss_drug
                     + 0.1 * loss_prot + 0.05 * loss_graph + loss_reg_w
-                    + loss_epi)
+                    + 0.05 * loss_rank + loss_epi)
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)

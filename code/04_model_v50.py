@@ -17,10 +17,11 @@ import torch.nn as nn
 
 class VCellModel(nn.Module):
     def __init__(self, feats, P=4422, hidden=256, latent=64, d_lowrank=64,
-                 response_basis=None, esm_dim=64, gate_mode='hard'):
+                 response_basis=None, esm_dim=64, gate_mode='hard', use_fp32=False):
         super().__init__()
         self.P = P
         self.latent = latent
+        self.use_fp32 = use_fp32  # ★ gpt2 步骤9：Morgan(2048)+desc 拼接 PCA-32 替换 morgan64+desc_proj
         if response_basis is not None:
             d_lowrank = response_basis.shape[1]  # ★ 低秩维与 U 基一致（步骤5 d 测试）
         self.d_lowrank = d_lowrank
@@ -63,13 +64,18 @@ class VCellModel(nn.Module):
         )
         self.fc_ctrl = nn.Linear(latent, P)
 
-        # ---- Response 分支（低秩扰动）：strain + genome + chem + Morgan + desc + med + temp + time + ct + ctx_prior ----
-        d_resp = 16 + 16 + 32 + 64 + 16 + 2 + 1 + 3 + 8 + 64
+        # ---- Response 分支（低秩扰动）：strain + genome + chem + [Morgan+desc | fp32] + med + temp + time + ct + ctx_prior ----
+        # ★ gpt2 步骤8：交互编码 hs×hc / hc×hk / hs×hk（先投影到共同 16 维再逐元素相乘）
+        _chem_d = 32 if use_fp32 else (64 + 16)
+        d_resp = 16 + 16 + 32 + _chem_d + 2 + 1 + 3 + 8 + 64 + 48
         self.resp_enc = nn.Sequential(
             nn.Linear(d_resp, hidden), nn.LayerNorm(hidden), nn.GELU(), nn.Dropout(0.2),
             nn.Linear(hidden, hidden), nn.LayerNorm(hidden), nn.GELU(), nn.Dropout(0.2),
             nn.Linear(hidden, d_lowrank), nn.LayerNorm(d_lowrank), nn.GELU(),
         )
+        self.Ws_h = nn.Linear(16, 16)   # strain → 16
+        self.Wc_h = nn.Linear(32, 16)   # chem → 16
+        self.Wk_h = nn.Linear(14, 16)   # ctx(med2+temp1+time3+ct8) → 16
 
         # ---- 低秩响应基 U（P × d_lowrank，从训练集 Δ SVD 学习，buffer 冻结）----
         if response_basis is not None:
@@ -79,6 +85,9 @@ class VCellModel(nn.Module):
         # 门控：seen 化合物/菌株控制响应强度
         self.gate_c = nn.Parameter(torch.tensor(3.0))
         self.gate_s = nn.Parameter(torch.tensor(3.0))
+        # ★ gpt2 步骤12：θ 参数化可靠性门控 g=σ(θ0+θ1·seen+θ2·sim+θ3·log(1+n))（gate_mode='gpt'）
+        self.theta_c = nn.Parameter(torch.tensor([-1.0, 2.0, 1.0, 0.5]))
+        self.theta_s = nn.Parameter(torch.tensor([-1.0, 2.0, 1.0]))  # φ0,φ1·seen,φ3·log1p(支持数)
 
         # ---- 蛋白级残差头（小权重，增强绝对保真）----
         self.resid_head = nn.Linear(d_lowrank, P)
@@ -139,11 +148,29 @@ class VCellModel(nn.Module):
         if temp.dim() == 1:
             temp = temp.unsqueeze(1)
 
-        z = self.resp_enc(torch.cat([se, sg, ce, morgan, self.desc_proj(x['chem_desc']),
-                                     med, temp, tfeat, cte, cp], dim=1))
+        # ★ gpt2 步骤8：交互编码（菌株×化合物 / 化合物×上下文 / 菌株×上下文，投影到 16 维后逐元素乘）
+        hs16 = self.Ws_h(se)
+        hc16 = self.Wc_h(ce)
+        hk16 = self.Wk_h(torch.cat([med, temp, tfeat, cte], dim=1))
+        inter = torch.cat([hs16 * hc16, hc16 * hk16, hs16 * hk16], dim=1)
+        if self.use_fp32:
+            # ★ gpt2 步骤9：Morgan(2048)+desc 拼接 PCA-32（替换 morgan_proj + desc_proj）
+            chem_in = x['chem_fp32']
+        else:
+            chem_in = torch.cat([morgan, self.desc_proj(x['chem_desc'])], dim=1)
+        z = self.resp_enc(torch.cat([se, sg, ce, chem_in,
+                                     med, temp, tfeat, cte, cp, inter], dim=1))
         # 低秩主项
         delta_lr = torch.mm(z, self.U.T)  # (N, P)
-        if self.gate_mode == 'rel':
+        if self.gate_mode == 'gpt':
+            # ★ gpt2 步骤12 原文：g_c = σ(θ0 + θ1·seen + θ2·max_sim + θ3·log(1+n_c))（θ 可学习）
+            g_c_feat = torch.stack([torch.ones_like(chem_seen), chem_seen,
+                                    x['chem_max_sim'], torch.log1p(x['chem_support']) * 0.2], dim=1)
+            g_s_feat = torch.stack([torch.ones_like(strain_seen), strain_seen,
+                                    torch.log1p(x['strain_support']) * 0.2], dim=1)
+            g_c = torch.sigmoid(g_c_feat @ self.theta_c).unsqueeze(1)
+            g_s = torch.sigmoid(g_s_feat @ self.theta_s).unsqueeze(1)
+        elif self.gate_mode == 'rel':
             # ★ 步骤12 可靠性门控（gpt2 P1-4）：由相似度/支持数驱动，替代硬 seen 门控
             chem_sim = x['chem_max_sim'].unsqueeze(1)
             chem_sp = (x['chem_support'] / 6.3).unsqueeze(1)
